@@ -461,11 +461,6 @@ public class IntervalJoinOperator<K, T1, T2, OUT>
 		}
 
 		@Override
-		public boolean canEqual(Object obj) {
-			return obj.getClass().equals(BufferEntrySerializer.class);
-		}
-
-		@Override
 		public TypeSerializerSnapshot<BufferEntry<T>> snapshotConfiguration() {
 			return new BufferEntrySerializerSnapshot<>(this);
 		}
@@ -514,7 +509,7 @@ public class IntervalJoinOperator<K, T1, T2, OUT>
 
 		@SuppressWarnings({"unused", "WeakerAccess"})
 		public BufferEntrySerializerSnapshot() {
-			super(correspondingSerializerClass());
+			super(BufferEntrySerializer.class);
 		}
 
 		BufferEntrySerializerSnapshot(BufferEntrySerializer<T> serializerInstance) {
@@ -535,11 +530,6 @@ public class IntervalJoinOperator<K, T1, T2, OUT>
 		@SuppressWarnings("unchecked")
 		protected BufferEntrySerializer<T> createOuterSerializerWithNestedSerializers(TypeSerializer<?>[] nestedSerializers) {
 			return new BufferEntrySerializer<>((TypeSerializer<T>) nestedSerializers[0]);
-		}
-
-		@SuppressWarnings("unchecked")
-		private static <T> Class<BufferEntrySerializer<T>> correspondingSerializerClass() {
-			return (Class<BufferEntrySerializer<T>>) (Class<?>) BufferEntrySerializer.class;
 		}
 	}
 

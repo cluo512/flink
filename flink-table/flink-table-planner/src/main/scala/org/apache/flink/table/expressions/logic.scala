@@ -38,7 +38,7 @@ abstract class BinaryPredicate extends BinaryExpression {
   }
 }
 
-case class Not(child: Expression) extends UnaryExpression {
+case class Not(child: PlannerExpression) extends UnaryExpression {
 
   override def toString = s"!($child)"
 
@@ -58,7 +58,7 @@ case class Not(child: Expression) extends UnaryExpression {
   }
 }
 
-case class And(left: Expression, right: Expression) extends BinaryPredicate {
+case class And(left: PlannerExpression, right: PlannerExpression) extends BinaryPredicate {
 
   override def toString = s"$left && $right"
 
@@ -67,7 +67,7 @@ case class And(left: Expression, right: Expression) extends BinaryPredicate {
   }
 }
 
-case class Or(left: Expression, right: Expression) extends BinaryPredicate {
+case class Or(left: PlannerExpression, right: PlannerExpression) extends BinaryPredicate {
 
   override def toString = s"$left || $right"
 
@@ -76,11 +76,14 @@ case class Or(left: Expression, right: Expression) extends BinaryPredicate {
   }
 }
 
+@deprecated(
+  "Use ifThenElse(...) instead. It is available through the implicit Scala DSL.",
+  "1.8.0")
 case class If(
-    condition: Expression,
-    ifTrue: Expression,
-    ifFalse: Expression)
-  extends Expression {
+    condition: PlannerExpression,
+    ifTrue: PlannerExpression,
+    ifFalse: PlannerExpression)
+  extends PlannerExpression {
   private[flink] def children = Seq(condition, ifTrue, ifFalse)
 
   override private[flink] def resultType = ifTrue.resultType

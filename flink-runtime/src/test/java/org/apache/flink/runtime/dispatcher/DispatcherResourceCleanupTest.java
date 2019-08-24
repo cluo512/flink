@@ -126,7 +126,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 	private CompletableFuture<ArchivedExecutionGraph> resultFuture;
 	private CompletableFuture<JobID> cleanupJobFuture;
 	private CompletableFuture<Void> terminationFuture;
-	private FaultySubmittedJobGraphStore submittedJobGraphStore;
+	private FaultyJobGraphStore submittedJobGraphStore;
 
 	@BeforeClass
 	public static void setupClass() {
@@ -150,8 +150,8 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 		clearedJobLatch = new OneShotLatch();
 		runningJobsRegistry = new SingleRunningJobsRegistry(jobId, clearedJobLatch);
 		highAvailabilityServices.setRunningJobsRegistry(runningJobsRegistry);
-		submittedJobGraphStore = new FaultySubmittedJobGraphStore();
-		highAvailabilityServices.setSubmittedJobGraphStore(submittedJobGraphStore);
+		submittedJobGraphStore = new FaultyJobGraphStore();
+		highAvailabilityServices.setJobGraphStore(submittedJobGraphStore);
 
 		storedHABlobFuture = new CompletableFuture<>();
 		deleteAllHABlobsFuture = new CompletableFuture<>();
@@ -228,8 +228,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 		submitJob();
 
 		// complete the job
-		resultFuture.complete(new ArchivedExecutionGraphBuilder().setJobID(jobId).setState(JobStatus.FINISHED).build());
-		terminationFuture.complete(null);
+		finishJob();
 
 		assertThatHABlobsHaveBeenRemoved();
 	}
@@ -356,6 +355,43 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 		}
 
 		assertThat(submissionFuture.get(), equalTo(Acknowledge.get()));
+	}
+
+	/**
+	 * Tests that a duplicate job submission won't delete any job meta data
+	 * (submitted job graphs, blobs, etc.).
+	 */
+	@Test
+	public void testDuplicateJobSubmissionDoesNotDeleteJobMetaData() throws Exception {
+		submitJob();
+
+		final CompletableFuture<Acknowledge> submissionFuture = dispatcherGateway.submitJob(jobGraph, timeout);
+
+		try {
+			try {
+				submissionFuture.get();
+				fail("Expected a JobSubmissionFailure.");
+			} catch (ExecutionException ee) {
+				assertThat(ExceptionUtils.findThrowable(ee, JobSubmissionException.class).isPresent(), is(true));
+			}
+
+			assertThatHABlobsHaveNotBeenRemoved();
+		} finally {
+			finishJob();
+		}
+
+		assertThatHABlobsHaveBeenRemoved();
+	}
+
+	private void finishJob() {
+		resultFuture.complete(new ArchivedExecutionGraphBuilder().setJobID(jobId).setState(JobStatus.FINISHED).build());
+		terminationFuture.complete(null);
+	}
+
+	private void assertThatHABlobsHaveNotBeenRemoved() {
+		assertThat(cleanupJobFuture.isDone(), is(false));
+		assertThat(deleteAllHABlobsFuture.isDone(), is(false));
+		assertThat(blobFile.exists(), is(true));
 	}
 
 	/**

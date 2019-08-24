@@ -29,7 +29,7 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
@@ -48,6 +48,7 @@ import org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTran
 import org.apache.flink.runtime.state.StateSnapshotTransformers;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueSet;
+import org.apache.flink.runtime.state.heap.InternalKeyContext;
 import org.apache.flink.runtime.state.ttl.TtlStateFactory;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -55,8 +56,6 @@ import org.apache.flink.util.FlinkRuntimeException;
 import javax.annotation.Nonnull;
 
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,21 +85,24 @@ public class MockKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 			Tuple2.of(FoldingStateDescriptor.class, (StateFactory) MockInternalFoldingState::createState)
 		).collect(Collectors.toMap(t -> t.f0, t -> t.f1));
 
-	private final Map<String, Map<K, Map<Object, Object>>> stateValues = new HashMap<>();
+	private final Map<String, Map<K, Map<Object, Object>>> stateValues;
 
-	private final Map<String, StateSnapshotTransformer<Object>> stateSnapshotFilters = new HashMap<>();
+	private final Map<String, StateSnapshotTransformer<Object>> stateSnapshotFilters;
 
 	MockKeyedStateBackend(
 		TaskKvStateRegistry kvStateRegistry,
 		TypeSerializer<K> keySerializer,
 		ClassLoader userCodeClassLoader,
-		int numberOfKeyGroups,
-		KeyGroupRange keyGroupRange,
 		ExecutionConfig executionConfig,
 		TtlTimeProvider ttlTimeProvider,
-		MetricGroup operatorMetricGroup) {
+		Map<String, Map<K, Map<Object, Object>>> stateValues,
+		Map<String, StateSnapshotTransformer<Object>> stateSnapshotFilters,
+		CloseableRegistry cancelStreamRegistry,
+		InternalKeyContext<K> keyContext) {
 		super(kvStateRegistry, keySerializer, userCodeClassLoader,
-			numberOfKeyGroups, keyGroupRange, executionConfig, ttlTimeProvider);
+			executionConfig, ttlTimeProvider, cancelStreamRegistry, keyContext);
+		this.stateValues = stateValues;
+		this.stateSnapshotFilters = stateSnapshotFilters;
 	}
 
 	@Override
@@ -182,20 +184,7 @@ public class MockKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 			SnapshotResult.of(new MockKeyedStateHandle<>(copy(stateValues, stateSnapshotFilters))));
 	}
 
-	@SuppressWarnings("unchecked")
-	@Override
-	public void restore(Collection<KeyedStateHandle> state) {
-		stateValues.clear();
-		state = state == null ? Collections.emptyList() : state;
-		state.forEach(ksh -> stateValues.putAll(copy(((MockKeyedStateHandle<K>) ksh).snapshotStates)));
-	}
-
-	private static <K> Map<String, Map<K, Map<Object, Object>>> copy(
-		Map<String, Map<K, Map<Object, Object>>> stateValues) {
-		return copy(stateValues, Collections.emptyMap());
-	}
-
-	private static <K> Map<String, Map<K, Map<Object, Object>>> copy(
+	static <K> Map<String, Map<K, Map<Object, Object>>> copy(
 		Map<String, Map<K, Map<Object, Object>>> stateValues, Map<String, StateSnapshotTransformer<Object>> stateSnapshotFilters) {
 		Map<String, Map<K, Map<Object, Object>>> snapshotStates = new HashMap<>();
 		for (String stateName : stateValues.keySet()) {
@@ -242,7 +231,7 @@ public class MockKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 			0);
 	}
 
-	private static class MockKeyedStateHandle<K> implements KeyedStateHandle {
+	static class MockKeyedStateHandle<K> implements KeyedStateHandle {
 		private static final long serialVersionUID = 1L;
 
 		final Map<String, Map<K, Map<Object, Object>>> snapshotStates;
@@ -263,7 +252,7 @@ public class MockKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
 		@Override
 		public void registerSharedStates(SharedStateRegistry stateRegistry) {
-			throw new UnsupportedOperationException();
+
 		}
 
 		@Override

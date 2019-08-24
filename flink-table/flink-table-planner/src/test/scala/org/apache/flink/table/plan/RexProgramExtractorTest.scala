@@ -28,10 +28,10 @@ import org.apache.calcite.sql.`type`.SqlTypeName
 import org.apache.calcite.sql.`type`.SqlTypeName.{BIGINT, INTEGER, VARCHAR}
 import org.apache.calcite.sql.fun.SqlStdOperatorTable
 import org.apache.calcite.util.{DateString, TimeString, TimestampString}
+import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog, GenericInMemoryCatalog}
 import org.apache.flink.table.expressions._
 import org.apache.flink.table.plan.util.{RexNodeToExpressionConverter, RexProgramExtractor}
 import org.apache.flink.table.utils.InputTypeBuilder.inputOf
-import org.apache.flink.table.validate.FunctionCatalog
 import org.hamcrest.CoreMatchers.is
 import org.junit.Assert.{assertArrayEquals, assertEquals, assertThat}
 import org.junit.Test
@@ -41,7 +41,12 @@ import scala.collection.mutable
 
 class RexProgramExtractorTest extends RexProgramTestBase {
 
-  private val functionCatalog: FunctionCatalog = FunctionCatalog.withBuiltIns
+  private val functionCatalog: FunctionCatalog = new FunctionCatalog(
+    new CatalogManager("default_catalog", new GenericInMemoryCatalog("default_catalog")))
+  private val expressionBridge: ExpressionBridge[PlannerExpression] =
+    new ExpressionBridge[PlannerExpression](
+      functionCatalog,
+      PlannerExpressionConverter.INSTANCE)
 
   @Test
   def testExtractRefInputFields(): Unit = {
@@ -621,7 +626,8 @@ class RexProgramExtractorTest extends RexProgramTestBase {
   private def assertExpressionArrayEquals(
       expected: Array[Expression],
       actual: Array[Expression]) = {
-    val sortedExpected = expected.sortBy(e => e.toString)
+    // TODO we assume only planner expression as a temporary solution to keep the old interfaces
+    val sortedExpected = expected.map(expressionBridge.bridge).sortBy(e => e.toString)
     val sortedActual = actual.sortBy(e => e.toString)
 
     assertEquals(sortedExpected.length, sortedActual.length)

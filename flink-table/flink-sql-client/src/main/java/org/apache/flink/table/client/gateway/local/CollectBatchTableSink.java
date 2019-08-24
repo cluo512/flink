@@ -18,19 +18,20 @@
 
 package org.apache.flink.table.client.gateway.local;
 
+import org.apache.flink.api.common.io.OutputFormat;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.Utils;
 import org.apache.flink.table.sinks.BatchTableSink;
-import org.apache.flink.table.sinks.TableSink;
+import org.apache.flink.table.sinks.OutputFormatTableSink;
 import org.apache.flink.types.Row;
 
 /**
  * Table sink for collecting the results locally all at once using accumulators.
  */
-public class CollectBatchTableSink implements BatchTableSink<Row> {
+public class CollectBatchTableSink extends OutputFormatTableSink<Row> implements BatchTableSink<Row> {
 
 	private final String accumulatorName;
 	private final TypeSerializer<Row> serializer;
@@ -41,6 +42,13 @@ public class CollectBatchTableSink implements BatchTableSink<Row> {
 	public CollectBatchTableSink(String accumulatorName, TypeSerializer<Row> serializer) {
 		this.accumulatorName = accumulatorName;
 		this.serializer = serializer;
+	}
+
+	/**
+	 * Returns the serializer for deserializing the collected result.
+	 */
+	public TypeSerializer<Row> getSerializer() {
+		return serializer;
 	}
 
 	@Override
@@ -59,7 +67,7 @@ public class CollectBatchTableSink implements BatchTableSink<Row> {
 	}
 
 	@Override
-	public TableSink<Row> configure(String[] fieldNames, TypeInformation<?>[] fieldTypes) {
+	public CollectBatchTableSink configure(String[] fieldNames, TypeInformation<?>[] fieldTypes) {
 		final CollectBatchTableSink copy = new CollectBatchTableSink(accumulatorName, serializer);
 		copy.fieldNames = fieldNames;
 		copy.fieldTypes = fieldTypes;
@@ -73,10 +81,8 @@ public class CollectBatchTableSink implements BatchTableSink<Row> {
 			.name("SQL Client Batch Collect Sink");
 	}
 
-	/**
-	 * Returns the serializer for deserializing the collected result.
-	 */
-	public TypeSerializer<Row> getSerializer() {
-		return serializer;
+	@Override
+	public OutputFormat<Row> getOutputFormat() {
+		return new Utils.CollectHelper<>(accumulatorName, serializer);
 	}
 }

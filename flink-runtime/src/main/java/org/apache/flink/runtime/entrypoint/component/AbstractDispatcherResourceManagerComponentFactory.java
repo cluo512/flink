@@ -189,7 +189,7 @@ public abstract class AbstractDispatcherResourceManagerComponentFactory<T extend
 				blobServer,
 				heartbeatServices,
 				jobManagerMetricGroup,
-				metricRegistry.getMetricQueryServicePath(),
+				metricRegistry.getMetricQueryServiceGatewayRpcAddress(),
 				archivedExecutionGraphStore,
 				fatalErrorHandler,
 				historyServerArchivist);
@@ -260,7 +260,7 @@ public abstract class AbstractDispatcherResourceManagerComponentFactory<T extend
 
 	protected String getHostname(RpcService rpcService) {
 		final String rpcServiceAddress = rpcService.getAddress();
-		return rpcServiceAddress == "" ? "localhost" : rpcServiceAddress;
+		return rpcServiceAddress != null && rpcServiceAddress.isEmpty() ? "localhost" : rpcServiceAddress;
 	}
 
 	protected abstract DispatcherResourceManagerComponent<T> createDispatcherResourceManagerComponent(

@@ -20,6 +20,7 @@ package org.apache.flink.container.entrypoint;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.client.cli.CliFrontendParser;
+import org.apache.flink.runtime.entrypoint.FlinkParseException;
 import org.apache.flink.runtime.entrypoint.parser.ParserResultFactory;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 
@@ -28,6 +29,7 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import java.util.Properties;
 
@@ -42,11 +44,9 @@ import static org.apache.flink.runtime.entrypoint.parser.CommandLineOptions.REST
  */
 public class StandaloneJobClusterConfigurationParserFactory implements ParserResultFactory<StandaloneJobClusterConfiguration> {
 
-	static final JobID DEFAULT_JOB_ID = new JobID(0, 0);
-
 	private static final Option JOB_CLASS_NAME_OPTION = Option.builder("j")
 		.longOpt("job-classname")
-		.required(true)
+		.required(false)
 		.hasArg(true)
 		.argName("job class name")
 		.desc("Class name of the job to run.")
@@ -75,15 +75,14 @@ public class StandaloneJobClusterConfigurationParserFactory implements ParserRes
 	}
 
 	@Override
-	public StandaloneJobClusterConfiguration createResult(@Nonnull CommandLine commandLine) {
+	public StandaloneJobClusterConfiguration createResult(@Nonnull CommandLine commandLine) throws FlinkParseException {
 		final String configDir = commandLine.getOptionValue(CONFIG_DIR_OPTION.getOpt());
 		final Properties dynamicProperties = commandLine.getOptionProperties(DYNAMIC_PROPERTY_OPTION.getOpt());
-		final String restPortString = commandLine.getOptionValue(REST_PORT_OPTION.getOpt(), "-1");
-		final int restPort = Integer.parseInt(restPortString);
+		final int restPort = getRestPort(commandLine);
 		final String hostname = commandLine.getOptionValue(HOST_OPTION.getOpt());
-		final String jobClassName = commandLine.getOptionValue(JOB_CLASS_NAME_OPTION.getOpt());
 		final SavepointRestoreSettings savepointRestoreSettings = CliFrontendParser.createSavepointRestoreSettings(commandLine);
 		final JobID jobId = getJobId(commandLine);
+		final String jobClassName = commandLine.getOptionValue(JOB_CLASS_NAME_OPTION.getOpt());
 
 		return new StandaloneJobClusterConfiguration(
 			configDir,
@@ -91,16 +90,34 @@ public class StandaloneJobClusterConfigurationParserFactory implements ParserRes
 			commandLine.getArgs(),
 			hostname,
 			restPort,
-			jobClassName,
 			savepointRestoreSettings,
-			jobId);
+			jobId,
+			jobClassName);
 	}
 
-	private static JobID getJobId(CommandLine commandLine) {
+	private int getRestPort(CommandLine commandLine) throws FlinkParseException {
+		final String restPortString = commandLine.getOptionValue(REST_PORT_OPTION.getOpt(), "-1");
+		try {
+			return Integer.parseInt(restPortString);
+		} catch (NumberFormatException e) {
+			throw createFlinkParseException(REST_PORT_OPTION, e);
+		}
+	}
+
+	@Nullable
+	private static JobID getJobId(CommandLine commandLine) throws FlinkParseException {
 		String jobId = commandLine.getOptionValue(JOB_ID_OPTION.getOpt());
 		if (jobId == null) {
-			return DEFAULT_JOB_ID;
+			return null;
 		}
-		return JobID.fromHexString(jobId);
+		try {
+			return JobID.fromHexString(jobId);
+		} catch (IllegalArgumentException e) {
+			throw createFlinkParseException(JOB_ID_OPTION, e);
+		}
+	}
+
+	private static FlinkParseException createFlinkParseException(Option option, Exception cause) {
+		return new FlinkParseException(String.format("Failed to parse '--%s' option", option.getLongOpt()), cause);
 	}
 }

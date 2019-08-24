@@ -18,6 +18,7 @@
 
 package org.apache.flink.table.client.cli;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.client.SqlClientException;
 import org.apache.flink.table.client.cli.SqlCommandParser.SqlCommandCall;
@@ -48,6 +49,7 @@ import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,21 +79,19 @@ public class CliClient {
 
 	private static final int SOURCE_MAX_SIZE = 50_000;
 
-	public CliClient(SessionContext context, Executor executor) {
+	/**
+	 * Creates a CLI instance with a custom terminal. Make sure to close the CLI instance
+	 * afterwards using {@link #close()}.
+	 */
+	@VisibleForTesting
+	public CliClient(Terminal terminal, SessionContext context, Executor executor) {
+		this.terminal = terminal;
 		this.context = context;
 		this.executor = executor;
 
-		try {
-			// initialize terminal
-			terminal = TerminalBuilder.builder()
-				.name(CliStrings.CLI_NAME)
-				.build();
-			// make space from previous output and test the writer
-			terminal.writer().println();
-			terminal.writer().flush();
-		} catch (IOException e) {
-			throw new SqlClientException("Error opening command line interface.", e);
-		}
+		// make space from previous output and test the writer
+		terminal.writer().println();
+		terminal.writer().flush();
 
 		// initialize line lineReader
 		lineReader = LineReaderBuilder.builder()
@@ -115,6 +115,14 @@ public class CliClient {
 			.style(AttributedStyle.DEFAULT)
 			.append("> ")
 			.toAnsi();
+	}
+
+	/**
+	 * Creates a CLI instance with a prepared terminal. Make sure to close the CLI instance
+	 * afterwards using {@link #close()}.
+	 */
+	public CliClient(SessionContext context, Executor executor) {
+		this(createDefaultTerminal(), context, executor);
 	}
 
 	public Terminal getTerminal() {
@@ -195,6 +203,17 @@ public class CliClient {
 	}
 
 	/**
+	 * Closes the CLI instance.
+	 */
+	public void close() {
+		try {
+			terminal.close();
+		} catch (IOException e) {
+			throw new SqlClientException("Unable to close terminal.", e);
+		}
+	}
+
+	/**
 	 * Submits a SQL update statement and prints status information and/or errors on the terminal.
 	 *
 	 * @param statement SQL update statement
@@ -245,11 +264,23 @@ public class CliClient {
 			case HELP:
 				callHelp();
 				break;
+			case SHOW_CATALOGS:
+				callShowCatalogs();
+				break;
+			case SHOW_DATABASES:
+				callShowDatabases();
+				break;
 			case SHOW_TABLES:
 				callShowTables();
 				break;
 			case SHOW_FUNCTIONS:
 				callShowFunctions();
+				break;
+			case USE_CATALOG:
+				callUseCatalog(cmdCall);
+				break;
+			case USE:
+				callUseDatabase(cmdCall);
 				break;
 			case DESCRIBE:
 				callDescribe(cmdCall);
@@ -325,6 +356,38 @@ public class CliClient {
 		terminal.flush();
 	}
 
+	private void callShowCatalogs() {
+		final List<String> catalogs;
+		try {
+			catalogs = executor.listCatalogs(context);
+		} catch (SqlExecutionException e) {
+			printExecutionException(e);
+			return;
+		}
+		if (catalogs.isEmpty()) {
+			terminal.writer().println(CliStrings.messageInfo(CliStrings.MESSAGE_EMPTY).toAnsi());
+		} else {
+			catalogs.forEach((v) -> terminal.writer().println(v));
+		}
+		terminal.flush();
+	}
+
+	private void callShowDatabases() {
+		final List<String> dbs;
+		try {
+			dbs = executor.listDatabases(context);
+		} catch (SqlExecutionException e) {
+			printExecutionException(e);
+			return;
+		}
+		if (dbs.isEmpty()) {
+			terminal.writer().println(CliStrings.messageInfo(CliStrings.MESSAGE_EMPTY).toAnsi());
+		} else {
+			dbs.forEach((v) -> terminal.writer().println(v));
+		}
+		terminal.flush();
+	}
+
 	private void callShowTables() {
 		final List<String> tables;
 		try {
@@ -344,7 +407,7 @@ public class CliClient {
 	private void callShowFunctions() {
 		final List<String> functions;
 		try {
-			functions = executor.listUserDefinedFunctions(context);
+			functions = executor.listFunctions(context);
 		} catch (SqlExecutionException e) {
 			printExecutionException(e);
 			return;
@@ -352,7 +415,28 @@ public class CliClient {
 		if (functions.isEmpty()) {
 			terminal.writer().println(CliStrings.messageInfo(CliStrings.MESSAGE_EMPTY).toAnsi());
 		} else {
+			Collections.sort(functions);
 			functions.forEach((v) -> terminal.writer().println(v));
+		}
+		terminal.flush();
+	}
+
+	private void callUseCatalog(SqlCommandCall cmdCall) {
+		try {
+			executor.useCatalog(context, cmdCall.operands[0]);
+		} catch (SqlExecutionException e) {
+			printExecutionException(e);
+			return;
+		}
+		terminal.flush();
+	}
+
+	private void callUseDatabase(SqlCommandCall cmdCall) {
+		try {
+			executor.useDatabase(context, cmdCall.operands[0]);
+		} catch (SqlExecutionException e) {
+			printExecutionException(e);
+			return;
 		}
 		terminal.flush();
 	}
@@ -529,5 +613,17 @@ public class CliClient {
 	private void printInfo(String message) {
 		terminal.writer().println(CliStrings.messageInfo(message).toAnsi());
 		terminal.flush();
+	}
+
+	// --------------------------------------------------------------------------------------------
+
+	private static Terminal createDefaultTerminal() {
+		try {
+			return TerminalBuilder.builder()
+				.name(CliStrings.CLI_NAME)
+				.build();
+		} catch (IOException e) {
+			throw new SqlClientException("Error opening command line interface.", e);
+		}
 	}
 }

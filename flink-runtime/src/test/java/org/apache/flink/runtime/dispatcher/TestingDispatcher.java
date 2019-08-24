@@ -42,6 +42,8 @@ import java.util.function.Function;
  */
 class TestingDispatcher extends Dispatcher {
 
+	private final CompletableFuture<Void> startFuture;
+
 	TestingDispatcher(
 		RpcService rpcService,
 		String endpointId,
@@ -51,7 +53,7 @@ class TestingDispatcher extends Dispatcher {
 		BlobServer blobServer,
 		HeartbeatServices heartbeatServices,
 		JobManagerMetricGroup jobManagerMetricGroup,
-		@Nullable String metricQueryServicePath,
+		@Nullable String metricQueryServiceAddress,
 		ArchivedExecutionGraphStore archivedExecutionGraphStore,
 		JobManagerRunnerFactory jobManagerRunnerFactory,
 		FatalErrorHandler fatalErrorHandler) throws Exception {
@@ -60,16 +62,30 @@ class TestingDispatcher extends Dispatcher {
 			endpointId,
 			configuration,
 			highAvailabilityServices,
-			highAvailabilityServices.getSubmittedJobGraphStore(),
+			highAvailabilityServices.getJobGraphStore(),
 			resourceManagerGatewayRetriever,
 			blobServer,
 			heartbeatServices,
 			jobManagerMetricGroup,
-			metricQueryServicePath,
+			metricQueryServiceAddress,
 			archivedExecutionGraphStore,
 			jobManagerRunnerFactory,
 			fatalErrorHandler,
 			VoidHistoryServerArchivist.INSTANCE);
+
+		this.startFuture = new CompletableFuture<>();
+	}
+
+	@Override
+	public void onStart() throws Exception {
+		try {
+			super.onStart();
+		} catch (Exception e) {
+			startFuture.completeExceptionally(e);
+			throw e;
+		}
+
+		startFuture.complete(null);
 	}
 
 	void completeJobExecution(ArchivedExecutionGraph archivedExecutionGraph) {
@@ -93,5 +109,9 @@ class TestingDispatcher extends Dispatcher {
 		return callAsyncWithoutFencing(
 			() -> listJobs(timeout).get().size(),
 			timeout);
+	}
+
+	void waitUntilStarted() {
+		startFuture.join();
 	}
 }

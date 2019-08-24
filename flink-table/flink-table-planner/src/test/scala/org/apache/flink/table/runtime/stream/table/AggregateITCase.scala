@@ -23,11 +23,11 @@ import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.table.api.scala._
-import org.apache.flink.table.runtime.utils.StreamITCase.RetractingSink
 import org.apache.flink.table.api.{StreamQueryConfig, Types}
-import org.apache.flink.table.expressions.Null
 import org.apache.flink.table.runtime.utils.JavaUserDefinedAggFunctions.{CountDistinct, DataViewTestAgg, WeightedAvg}
+import org.apache.flink.table.runtime.utils.StreamITCase.RetractingSink
 import org.apache.flink.table.runtime.utils.{JavaUserDefinedAggFunctions, StreamITCase, StreamTestData, StreamingWithStateTestBase}
+import org.apache.flink.table.utils.CountMinMax
 import org.apache.flink.types.Row
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -142,7 +142,7 @@ class AggregateITCase extends StreamingWithStateTestBase {
     StreamITCase.clear
 
     val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv, 'a, 'b, 'c)
-      .select('b, Null(Types.LONG)).distinct()
+      .select('b, nullOf(Types.LONG)).distinct()
 
     val results = t.toRetractStream[Row](queryConfig)
     results.addSink(new StreamITCase.RetractingSink).setParallelism(1)
@@ -337,5 +337,46 @@ class AggregateITCase extends StreamingWithStateTestBase {
 
     val expected = List("(true,A,1)", "(true,B,2)", "(true,C,3)")
     assertEquals(expected.sorted, RowCollector.getAndClearValues.map(_.toString).sorted)
+  }
+
+  @Test
+  def testNonGroupedAggregate(): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setStateBackend(getStateBackend)
+    val tEnv = StreamTableEnvironment.create(env)
+    StreamITCase.clear
+
+    val testAgg = new CountMinMax
+    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv, 'a, 'b, 'c)
+      .aggregate(testAgg('a))
+      .select('f0, 'f1, 'f2)
+
+    val results = t.toRetractStream[Row](queryConfig)
+    results.addSink(new StreamITCase.RetractingSink).setParallelism(1)
+    env.execute()
+
+    val expected = List("21,1,21")
+    assertEquals(expected.sorted, StreamITCase.retractedResults.sorted)
+  }
+
+  @Test
+  def testAggregate(): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setStateBackend(getStateBackend)
+    val tEnv = StreamTableEnvironment.create(env)
+    StreamITCase.clear
+
+    val testAgg = new CountMinMax
+    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv, 'a, 'b, 'c)
+      .groupBy('b)
+      .aggregate(testAgg('a))
+      .select('b, 'f0, 'f1, 'f2)
+
+    val results = t.toRetractStream[Row](queryConfig)
+    results.addSink(new StreamITCase.RetractingSink)
+    env.execute()
+
+    val expected = List("1,1,1,1", "2,2,2,3", "3,3,4,6", "4,4,7,10", "5,5,11,15", "6,6,16,21")
+    assertEquals(expected.sorted, StreamITCase.retractedResults.sorted)
   }
 }

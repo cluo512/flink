@@ -51,6 +51,8 @@ import java.util.Map;
  */
 public class TestUtils {
 
+	static final int MAX_PARALLELISM = 10;
+
 	static OneInputStreamOperatorTestHarness<Tuple2<String, Integer>, Object> createRescalingTestSink(
 			File outDir,
 			int totalParallelism,
@@ -102,7 +104,7 @@ public class TestUtils {
 				.withBucketFactory(bucketFactory)
 				.build();
 
-		return new OneInputStreamOperatorTestHarness<>(new StreamSink<>(sink), 10, totalParallelism, taskIdx);
+		return new OneInputStreamOperatorTestHarness<>(new StreamSink<>(sink), MAX_PARALLELISM, totalParallelism, taskIdx);
 	}
 
 	static OneInputStreamOperatorTestHarness<Tuple2<String, Integer>, Object> createTestSinkWithBulkEncoder(
@@ -114,14 +116,39 @@ public class TestUtils {
 			final BulkWriter.Factory<Tuple2<String, Integer>> writer,
 			final BucketFactory<Tuple2<String, Integer>, String> bucketFactory) throws Exception {
 
-		StreamingFileSink<Tuple2<String, Integer>> sink = StreamingFileSink
-				.forBulkFormat(new Path(outDir.toURI()), writer)
-				.withBucketAssigner(bucketer)
-				.withBucketCheckInterval(bucketCheckInterval)
-				.withBucketFactory(bucketFactory)
-				.build();
+		return createTestSinkWithBulkEncoder(
+				outDir,
+				totalParallelism,
+				taskIdx,
+				bucketCheckInterval,
+				bucketer,
+				writer,
+				bucketFactory,
+				PartFileConfig.DEFAULT_PART_PREFIX,
+				PartFileConfig.DEFAULT_PART_SUFFIX);
+	}
 
-		return new OneInputStreamOperatorTestHarness<>(new StreamSink<>(sink), 10, totalParallelism, taskIdx);
+	static OneInputStreamOperatorTestHarness<Tuple2<String, Integer>, Object> createTestSinkWithBulkEncoder(
+			final File outDir,
+			final int totalParallelism,
+			final int taskIdx,
+			final long bucketCheckInterval,
+			final BucketAssigner<Tuple2<String, Integer>, String> bucketer,
+			final BulkWriter.Factory<Tuple2<String, Integer>> writer,
+			final BucketFactory<Tuple2<String, Integer>, String> bucketFactory,
+			final String partFilePrefix,
+			final String partFileSuffix) throws Exception {
+
+		StreamingFileSink<Tuple2<String, Integer>> sink = StreamingFileSink
+			.forBulkFormat(new Path(outDir.toURI()), writer)
+			.withBucketAssigner(bucketer)
+			.withBucketCheckInterval(bucketCheckInterval)
+			.withBucketFactory(bucketFactory)
+			.withPartFilePrefix(partFilePrefix)
+			.withPartFileSuffix(partFileSuffix)
+			.build();
+
+		return new OneInputStreamOperatorTestHarness<>(new StreamSink<>(sink), MAX_PARALLELISM, totalParallelism, taskIdx);
 	}
 
 	static void checkLocalFs(File outDir, int expectedInProgress, int expectedCompleted) {

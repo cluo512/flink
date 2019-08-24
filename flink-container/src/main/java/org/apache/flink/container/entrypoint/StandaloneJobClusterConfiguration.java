@@ -35,13 +35,13 @@ import static java.util.Objects.requireNonNull;
 final class StandaloneJobClusterConfiguration extends EntrypointClusterConfiguration {
 
 	@Nonnull
-	private final String jobClassName;
-
-	@Nonnull
 	private final SavepointRestoreSettings savepointRestoreSettings;
 
-	@Nonnull
+	@Nullable
 	private final JobID jobId;
+
+	@Nullable
+	private final String jobClassName;
 
 	StandaloneJobClusterConfiguration(
 			@Nonnull String configDir,
@@ -49,18 +49,13 @@ final class StandaloneJobClusterConfiguration extends EntrypointClusterConfigura
 			@Nonnull String[] args,
 			@Nullable String hostname,
 			int restPort,
-			@Nonnull String jobClassName,
 			@Nonnull SavepointRestoreSettings savepointRestoreSettings,
-			@Nonnull JobID jobId) {
+			@Nullable JobID jobId,
+			@Nullable String jobClassName) {
 		super(configDir, dynamicProperties, args, hostname, restPort);
-		this.jobClassName = requireNonNull(jobClassName, "jobClassName");
 		this.savepointRestoreSettings = requireNonNull(savepointRestoreSettings, "savepointRestoreSettings");
-		this.jobId = requireNonNull(jobId, "jobId");
-	}
-
-	@Nonnull
-	String getJobClassName() {
-		return jobClassName;
+		this.jobId = jobId;
+		this.jobClassName = jobClassName;
 	}
 
 	@Nonnull
@@ -68,8 +63,13 @@ final class StandaloneJobClusterConfiguration extends EntrypointClusterConfigura
 		return savepointRestoreSettings;
 	}
 
-	@Nonnull
+	@Nullable
 	JobID getJobId() {
 		return jobId;
+	}
+
+	@Nullable
+	String getJobClassName() {
+		return jobClassName;
 	}
 }

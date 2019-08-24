@@ -26,10 +26,9 @@ import org.apache.calcite.rel.{RelCollation, RelDistribution, RelReferentialCons
 import org.apache.calcite.schema.Statistic
 import org.apache.calcite.util.ImmutableBitSet
 import org.apache.flink.table.plan.schema.TableSourceTable
-import org.apache.flink.table.plan.schema.InlineTable
 
 /**
-  * The class provides statistics for a [[InlineTable]] or [[TableSourceTable]].
+  * The class provides statistics for a [[TableSourceTable]].
   *
   * @param tableStats The table statistics.
   */
@@ -49,7 +48,7 @@ class FlinkStatistic(tableStats: Option[TableStats]) extends Statistic {
     * @return The stats of the specified column.
     */
   def getColumnStats(columnName: String): ColumnStats = tableStats match {
-    case Some(tStats) => tStats.colStats.get(columnName)
+    case Some(tStats) => tStats.getColumnStats.get(columnName)
     case None => null
   }
 
@@ -59,7 +58,7 @@ class FlinkStatistic(tableStats: Option[TableStats]) extends Statistic {
     * @return The number of rows of the table.
     */
   override def getRowCount: Double = tableStats match {
-    case Some(tStats) => tStats.rowCount.toDouble
+    case Some(tStats) => tStats.getRowCount.toDouble
     case None => null
   }
 
@@ -87,6 +86,6 @@ object FlinkStatistic {
     * @param tableStats The table statistics.
     * @return The generated FlinkStatistic
     */
-  def of(tableStats: TableStats): FlinkStatistic = new FlinkStatistic(Some(tableStats))
+  def of(tableStats: TableStats): FlinkStatistic = new FlinkStatistic(Option(tableStats))
 
 }

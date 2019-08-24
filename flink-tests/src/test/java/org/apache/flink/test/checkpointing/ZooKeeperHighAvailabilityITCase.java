@@ -39,6 +39,7 @@ import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.executiongraph.metrics.NumberOfFullRestartsGauge;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobStatus;
+import org.apache.flink.runtime.state.CheckpointListener;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.runtime.state.StateBackend;
@@ -78,6 +79,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.number.OrderingComparison.greaterThan;
@@ -106,8 +108,9 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 
 	private static MiniClusterWithClientResource miniClusterResource;
 
-	private static OneShotLatch waitForCheckpointLatch = new OneShotLatch();
-	private static OneShotLatch failInCheckpointLatch = new OneShotLatch();
+	private static OneShotLatch waitForCheckpointLatch;
+	private static OneShotLatch failInCheckpointLatch;
+	private static OneShotLatch blockSnapshotLatch;
 
 	@BeforeClass
 	public static void setup() throws Exception {
@@ -179,6 +182,7 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 
 		waitForCheckpointLatch = new OneShotLatch();
 		failInCheckpointLatch = new OneShotLatch();
+		blockSnapshotLatch = new OneShotLatch();
 
 		ClusterClient<?> clusterClient = miniClusterResource.getClusterClient();
 		final Deadline deadline = Deadline.now().plus(TEST_TIMEOUT);
@@ -255,6 +259,7 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 				return FileVisitResult.CONTINUE;
 			}
 		});
+		blockSnapshotLatch.trigger();
 
 		// now the job should be able to go to RUNNING again and then eventually to FINISHED,
 		// which it only does if it could successfully restore
@@ -330,7 +335,7 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 
 	private static class CheckpointBlockingFunction
 			extends RichMapFunction<String, String>
-			implements CheckpointedFunction {
+			implements CheckpointedFunction, CheckpointListener {
 
 		// verify that we only call initializeState()
 		// once with isRestored() == false. All other invocations must have isRestored() == true. This
@@ -349,6 +354,14 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 
 		static AtomicBoolean failedAlready = new AtomicBoolean(false);
 
+		static AtomicBoolean stateRecorded = new AtomicBoolean(false);
+
+		// for checkpoint with a id not less than this id, it includes state data
+		static AtomicLong minimalCheckpointIdIncludingData = new AtomicLong(Long.MAX_VALUE);
+
+		// make sure there is at least one completed checkpoint including state data
+		static AtomicBoolean checkpointCompletedIncludingData = new AtomicBoolean(false);
+
 		// also have some state to write to the checkpoint
 		private final ValueStateDescriptor<String> stateDescriptor =
 			new ValueStateDescriptor<>("state", StringSerializer.INSTANCE);
@@ -356,16 +369,27 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 		@Override
 		public String map(String value) throws Exception {
 			getRuntimeContext().getState(stateDescriptor).update("42");
+			stateRecorded.compareAndSet(false, true);
 			return value;
 		}
 
 		@Override
 		public void snapshotState(FunctionSnapshotContext context) throws Exception {
-			if (context.getCheckpointId() > 5) {
+			if (stateRecorded.get()) {
+				minimalCheckpointIdIncludingData.compareAndSet(Long.MAX_VALUE,
+					context.getCheckpointId());
+			}
+			if (checkpointCompletedIncludingData.get()) {
+				// there is a checkpoint completed with state data, we can trigger the failure now
 				waitForCheckpointLatch.trigger();
 				failInCheckpointLatch.await();
 				if (!failedAlready.getAndSet(true)) {
 					throw new RuntimeException("Failing on purpose.");
+				} else {
+					// make sure there would be no more successful checkpoint before job failing
+					// otherwise there might be an unexpected successful checkpoint even
+					// CheckpointFailureManager has decided to fail the job
+					blockSnapshotLatch.await();
 				}
 			}
 		}
@@ -385,6 +409,13 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 					// already saw the one allowed successful restore
 					illegalRestores.getAndIncrement();
 				}
+			}
+		}
+
+		@Override
+		public void notifyCheckpointComplete(long checkpointId) throws Exception {
+			if (checkpointId >= minimalCheckpointIdIncludingData.get()) {
+				checkpointCompletedIncludingData.compareAndSet(false, true);
 			}
 		}
 	}

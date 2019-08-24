@@ -25,18 +25,10 @@ under the License.
 * TOC
 {:toc}
 
-## Reading from file systems
+## Reading from and writing to file systems
 
-Flink has built-in support for the following file systems:
-
-| Filesystem                            | Scheme       | Notes  |
-| ------------------------------------- |--------------| ------ |
-| Hadoop Distributed File System (HDFS) &nbsp; | `hdfs://`    | All HDFS versions are supported |
-| Amazon S3                             | `s3://`      | Support through Hadoop file system implementation (see below) |
-| MapR file system                      | `maprfs://`  | The user has to manually place the required jar files in the `lib/` dir |
-| Alluxio                               | `alluxio://` &nbsp; | Support through Hadoop file system implementation (see below) |
-
-
+The Apache Flink project supports multiple [file systems]({{ site.baseurl }}/ops/filesystems/index.html) that can be used as backing stores
+for input and output connectors. 
 
 ### Using Hadoop file system implementations
 
@@ -93,7 +85,7 @@ Also, the serialization framework of Flink is able to handle classes generated f
 <dependency>
   <groupId>org.apache.flink</groupId>
   <artifactId>flink-avro</artifactId>
-  <version>{{site.version }}</version>
+  <version>{{ site.version }}</version>
 </dependency>
 {% endhighlight %}
 
@@ -224,5 +216,11 @@ The example shows how to access an Azure table and turn data into Flink's `DataS
 ## Access MongoDB
 
 This [GitHub repository documents how to use MongoDB with Apache Flink (starting from 0.7-incubating)](https://github.com/okkam-it/flink-mongodb-test).
+
+## Hive Connector
+
+Starting from 1.9.0, Apache Flink provides Hive connector to access Apache Hive tables. [HiveCatalog]({{ site.baseurl }}/dev/table/catalogs.html#hivecatalog) is required in order to use the Hive connector.
+After HiveCatalog is setup, please refer to [Reading & Writing Hive Tables]({{ site.baseurl }}/dev/table/hive/read_write_hive.html) for the usage of the Hive connector and its limitations.
+Same as HiveCatalog, the officially supported Apache Hive versions for Hive connector are 2.3.4 and 1.2.1.
 
 {% top %}

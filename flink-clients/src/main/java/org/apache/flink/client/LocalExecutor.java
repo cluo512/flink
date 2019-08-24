@@ -20,10 +20,8 @@ package org.apache.flink.client;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobExecutionResult;
-import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.Plan;
 import org.apache.flink.api.common.PlanExecutor;
-import org.apache.flink.api.common.Program;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
@@ -248,11 +246,6 @@ public class LocalExecutor extends PlanExecutor {
 		return new PlanJSONDumpGenerator().getOptimizerPlanAsJSON(op);
 	}
 
-	@Override
-	public void endSession(JobID jobID) throws Exception {
-		// no op
-	}
-
 	private Configuration createConfiguration() {
 		Configuration newConfiguration = new Configuration();
 		newConfiguration.setInteger(TaskManagerOptions.NUM_TASK_SLOTS, getTaskManagerNumSlots());
@@ -266,20 +259,6 @@ public class LocalExecutor extends PlanExecutor {
 	// --------------------------------------------------------------------------------------------
 	//  Static variants that internally bring up an instance and shut it down after the execution
 	// --------------------------------------------------------------------------------------------
-
-	/**
-	 * Executes the given program.
-	 *
-	 * @param pa The program.
-	 * @param args The parameters.
-	 * @return The execution result of the program.
-	 *
-	 * @throws Exception Thrown, if either the startup of the local execution context, or the execution
-	 *                   caused an exception.
-	 */
-	public static JobExecutionResult execute(Program pa, String... args) throws Exception {
-		return execute(pa.getPlan(args));
-	}
 
 	/**
 	 * Executes the given dataflow plan.

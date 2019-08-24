@@ -27,6 +27,8 @@ import org.apache.calcite.sql.parser.SqlParser
 import org.apache.calcite.sql.util.ChainedSqlOperatorTable
 import org.apache.calcite.sql2rel.SqlToRelConverter
 import org.apache.calcite.tools.{RuleSet, RuleSets}
+import org.apache.flink.annotation.Internal
+import org.apache.flink.table.api.PlannerConfig
 import org.apache.flink.util.Preconditions
 
 import scala.collection.JavaConverters._
@@ -34,6 +36,7 @@ import scala.collection.JavaConverters._
 /**
   * Builder for creating a Calcite configuration.
   */
+@Internal
 class CalciteConfigBuilder {
 
   /**
@@ -192,27 +195,12 @@ class CalciteConfigBuilder {
   /**
     * Replaces the built-in SqlToRelConverter configuration with the given configuration.
     */
-  def replaceSqlToRelConverterConfig(config: SqlToRelConverter.Config): CalciteConfigBuilder = {
+  def replaceSqlToRelConverterConfig(config: SqlToRelConverter.Config)
+  : CalciteConfigBuilder = {
     Preconditions.checkNotNull(config)
     replaceSqlToRelConverterConfig = Some(config)
     this
   }
-
-  private class CalciteConfigImpl(
-      val getNormRuleSet: Option[RuleSet],
-      val replacesNormRuleSet: Boolean,
-      val getLogicalOptRuleSet: Option[RuleSet],
-      val replacesLogicalOptRuleSet: Boolean,
-      val getPhysicalOptRuleSet: Option[RuleSet],
-      val replacesPhysicalOptRuleSet: Boolean,
-      val getDecoRuleSet: Option[RuleSet],
-      val replacesDecoRuleSet: Boolean,
-      val getSqlOperatorTable: Option[SqlOperatorTable],
-      val replacesSqlOperatorTable: Boolean,
-      val getSqlParserConfig: Option[SqlParser.Config],
-      val getSqlToRelConverterConfig: Option[SqlToRelConverter.Config])
-    extends CalciteConfig
-
 
   /**
     * Convert the [[RuleSet]] List to [[Option]] type
@@ -232,7 +220,7 @@ class CalciteConfigBuilder {
   /**
     * Builds a new [[CalciteConfig]].
     */
-  def build(): CalciteConfig = new CalciteConfigImpl(
+  def build(): CalciteConfig = new CalciteConfig(
     getRuleSet(normRuleSets),
     replaceNormRules,
     getRuleSet(logicalOptRuleSets),
@@ -256,68 +244,32 @@ class CalciteConfigBuilder {
 /**
   * Calcite configuration for defining a custom Calcite configuration for Table and SQL API.
   */
-trait CalciteConfig {
-
-  /**
-    * Returns whether this configuration replaces the built-in normalization rule set.
-    */
-  def replacesNormRuleSet: Boolean
-
-  /**
-    * Returns a custom normalization rule set.
-    */
-  def getNormRuleSet: Option[RuleSet]
-
-  /**
-    * Returns whether this configuration replaces the built-in logical optimization rule set.
-    */
-  def replacesLogicalOptRuleSet: Boolean
-
-  /**
-    * Returns a custom logical optimization rule set.
-    */
-  def getLogicalOptRuleSet: Option[RuleSet]
-
-  /**
-    * Returns whether this configuration replaces the built-in physical optimization rule set.
-    */
-  def replacesPhysicalOptRuleSet: Boolean
-
-  /**
-    * Returns a custom physical optimization rule set.
-    */
-  def getPhysicalOptRuleSet: Option[RuleSet]
-
-  /**
-    * Returns whether this configuration replaces the built-in decoration rule set.
-    */
-  def replacesDecoRuleSet: Boolean
-
-  /**
-    * Returns a custom decoration rule set.
-    */
-  def getDecoRuleSet: Option[RuleSet]
-
-  /**
-    * Returns whether this configuration replaces the built-in SQL operator table.
-    */
-  def replacesSqlOperatorTable: Boolean
-
-  /**
-    * Returns a custom SQL operator table.
-    */
-  def getSqlOperatorTable: Option[SqlOperatorTable]
-
-  /**
-    * Returns a custom SQL parser configuration.
-    */
-  def getSqlParserConfig: Option[SqlParser.Config]
-
-  /**
-    * Returns a custom configuration for SqlToRelConverter.
-    */
-  def getSqlToRelConverterConfig: Option[SqlToRelConverter.Config]
-}
+@Internal
+class CalciteConfig(
+  /** A custom normalization rule set. */
+  val normRuleSet: Option[RuleSet],
+  /** Whether this configuration replaces the built-in normalization rule set. */
+  val replacesNormRuleSet: Boolean,
+  /** A custom logical optimization rule set. */
+  val logicalOptRuleSet: Option[RuleSet],
+  /** Whether this configuration replaces the built-in logical optimization rule set. */
+  val replacesLogicalOptRuleSet: Boolean,
+  /** A custom physical optimization rule set. */
+  val physicalOptRuleSet: Option[RuleSet],
+  /** Whether this configuration replaces the built-in physical optimization rule set. */
+  val replacesPhysicalOptRuleSet: Boolean,
+  /** A custom decoration rule set. */
+  val decoRuleSet: Option[RuleSet],
+  /** Whether this configuration replaces the built-in decoration rule set. */
+  val replacesDecoRuleSet: Boolean,
+  /** A custom SQL operator table. */
+  val sqlOperatorTable: Option[SqlOperatorTable],
+  /** Whether this configuration replaces the built-in SQL operator table. */
+  val replacesSqlOperatorTable: Boolean,
+  /** A custom SQL parser configuration. */
+  val sqlParserConfig: Option[SqlParser.Config],
+  /** A custom configuration for SqlToRelConverter. */
+  val sqlToRelConverterConfig: Option[SqlToRelConverter.Config]) extends PlannerConfig
 
 object CalciteConfig {
 

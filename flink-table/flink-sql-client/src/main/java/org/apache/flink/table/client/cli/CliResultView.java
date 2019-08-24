@@ -145,13 +145,14 @@ public abstract class CliResultView<O extends Enum<O>> extends CliView<O, Void> 
 		final CliRowView view = new CliRowView(
 			client,
 			resultDescriptor.getResultSchema().getFieldNames(),
-			CliUtils.typesToString(resultDescriptor.getResultSchema().getFieldTypes()),
+			CliUtils.typesToString(resultDescriptor.getResultSchema().getFieldDataTypes()),
 			getRow(results.get(selectedRow)));
 		view.open(); // enter view
 	}
 
-	protected void stopRetrieval() {
+	protected void stopRetrieval(boolean cleanUpQuery) {
 		// stop retrieval
+		refreshThread.cleanUpQuery = cleanUpQuery;
 		refreshThread.isRunning = false;
 		synchronized (refreshThread) {
 			refreshThread.notify();
@@ -217,7 +218,7 @@ public abstract class CliResultView<O extends Enum<O>> extends CliView<O, Void> 
 
 	@Override
 	protected void cleanUp() {
-		stopRetrieval();
+		stopRetrieval(true);
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -225,6 +226,8 @@ public abstract class CliResultView<O extends Enum<O>> extends CliView<O, Void> 
 	private class RefreshThread extends Thread {
 
 		public volatile boolean isRunning = true;
+
+		public volatile boolean cleanUpQuery = true;
 
 		public long lastUpdatedResults = System.currentTimeMillis();
 
@@ -278,13 +281,15 @@ public abstract class CliResultView<O extends Enum<O>> extends CliView<O, Void> 
 				}
 			}
 
-			// cancel table program
-			try {
-				// the cancellation happens in the refresh thread in order to keep the main thread
-				// responsive at all times; esp. if the cluster is not available
-				client.getExecutor().cancelQuery(client.getContext(), resultDescriptor.getResultId());
-			} catch (SqlExecutionException e) {
-				// ignore further exceptions
+			if (cleanUpQuery) {
+				// cancel table program
+				try {
+					// the cancellation happens in the refresh thread in order to keep the main thread
+					// responsive at all times; esp. if the cluster is not available
+					client.getExecutor().cancelQuery(client.getContext(), resultDescriptor.getResultId());
+				} catch (SqlExecutionException e) {
+					// ignore further exceptions
+				}
 			}
 		}
 	}

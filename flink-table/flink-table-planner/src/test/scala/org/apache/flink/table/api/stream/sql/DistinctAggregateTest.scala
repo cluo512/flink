@@ -20,14 +20,13 @@ package org.apache.flink.table.api.stream.sql
 
 import org.apache.flink.api.scala._
 import org.apache.flink.table.api.scala._
-import org.apache.flink.table.plan.logical.{SessionGroupWindow, SlidingGroupWindow, TumblingGroupWindow}
-import org.apache.flink.table.utils.{StreamTableTestUtil, TableTestBase}
 import org.apache.flink.table.utils.TableTestUtil._
+import org.apache.flink.table.utils.{StreamTableTestUtil, TableTestBase}
 import org.junit.{Ignore, Test}
 
 class DistinctAggregateTest extends TableTestBase {
   private val streamUtil: StreamTableTestUtil = streamTestUtil()
-  streamUtil.addTable[(Int, String, Long)](
+  private val table = streamUtil.addTable[(Int, String, Long)](
     "MyTable",
     'a, 'b, 'c,
     'proctime.proctime, 'rowtime.rowtime)
@@ -41,7 +40,7 @@ class DistinctAggregateTest extends TableTestBase {
         "DataStreamGroupAggregate",
         unaryNode(
           "DataStreamCalc",
-          streamTableNode(0),
+          streamTableNode(table),
           term("select", "a, b, c")
         ),
         term("groupBy", "a, b, c"),
@@ -62,7 +61,7 @@ class DistinctAggregateTest extends TableTestBase {
         "DataStreamGroupAggregate",
         unaryNode(
           "DataStreamCalc",
-          streamTableNode(0),
+          streamTableNode(table),
           term("select", "a")
         ),
         term("groupBy", "a"),
@@ -83,7 +82,7 @@ class DistinctAggregateTest extends TableTestBase {
         "DataStreamGroupAggregate",
         unaryNode(
           "DataStreamCalc",
-          streamTableNode(0),
+          streamTableNode(table),
           term("select", "c", "a", "b")
         ),
         term("groupBy", "c"),
@@ -104,10 +103,10 @@ class DistinctAggregateTest extends TableTestBase {
       "DataStreamGroupWindowAggregate",
       unaryNode(
         "DataStreamCalc",
-        streamTableNode(0),
+        streamTableNode(table),
         term("select", "rowtime", "a")
       ),
-      term("window", TumblingGroupWindow('w$, 'rowtime, 900000.millis)),
+      term("window", "TumblingGroupWindow('w$, 'rowtime, 900000.millis)"),
       term("select", "COUNT(DISTINCT a) AS EXPR$0", "SUM(a) AS EXPR$1")
     )
 
@@ -126,10 +125,10 @@ class DistinctAggregateTest extends TableTestBase {
       "DataStreamGroupWindowAggregate",
       unaryNode(
         "DataStreamCalc",
-        streamTableNode(0),
+        streamTableNode(table),
         term("select", "rowtime", "a")
       ),
-      term("window", SlidingGroupWindow('w$, 'rowtime, 3600000.millis, 900000.millis)),
+      term("window", "SlidingGroupWindow('w$, 'rowtime, 3600000.millis, 900000.millis)"),
       term("select", "COUNT(DISTINCT a) AS EXPR$0", "SUM(DISTINCT a) AS EXPR$1",
         "MAX(DISTINCT a) AS EXPR$2")
     )
@@ -149,11 +148,11 @@ class DistinctAggregateTest extends TableTestBase {
       "DataStreamGroupWindowAggregate",
       unaryNode(
         "DataStreamCalc",
-        streamTableNode(0),
+        streamTableNode(table),
         term("select", "a", "rowtime", "c")
       ),
       term("groupBy", "a"),
-      term("window", SessionGroupWindow('w$, 'rowtime, 900000.millis)),
+      term("window", "SessionGroupWindow('w$, 'rowtime, 900000.millis)"),
       term("select", "a", "COUNT(a) AS EXPR$1", "SUM(DISTINCT c) AS EXPR$2")
     )
 

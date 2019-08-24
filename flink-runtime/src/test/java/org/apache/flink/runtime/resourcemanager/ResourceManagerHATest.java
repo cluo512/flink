@@ -19,7 +19,6 @@
 package org.apache.flink.runtime.resourcemanager;
 
 import org.apache.flink.api.common.time.Time;
-import org.apache.flink.runtime.clusterframework.FlinkResourceManager;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.entrypoint.ClusterInformation;
 import org.apache.flink.runtime.heartbeat.TestingHeartbeatServices;
@@ -69,7 +68,8 @@ public class ResourceManagerHATest extends TestLogger {
 			new SlotManagerConfiguration(
 				TestingUtils.infiniteTime(),
 				TestingUtils.infiniteTime(),
-				TestingUtils.infiniteTime()));
+				TestingUtils.infiniteTime(),
+				true));
 		ResourceManagerRuntimeServices resourceManagerRuntimeServices = ResourceManagerRuntimeServices.fromConfiguration(
 			resourceManagerRuntimeServicesConfiguration,
 			highAvailabilityServices,
@@ -82,7 +82,7 @@ public class ResourceManagerHATest extends TestLogger {
 		final ResourceManager resourceManager =
 			new StandaloneResourceManager(
 				rpcService,
-				FlinkResourceManager.RESOURCE_MANAGER_NAME,
+				ResourceManager.RESOURCE_MANAGER_NAME,
 				rmResourceId,
 				highAvailabilityServices,
 				heartbeatServices,
@@ -91,7 +91,8 @@ public class ResourceManagerHATest extends TestLogger {
 				resourceManagerRuntimeServices.getJobLeaderIdService(),
 				new ClusterInformation("localhost", 1234),
 				testingFatalErrorHandler,
-				UnregisteredMetricGroups.createUnregisteredJobManagerMetricGroup()) {
+				UnregisteredMetricGroups.createUnregisteredJobManagerMetricGroup(),
+				Time.minutes(5L)) {
 
 				@Override
 				public void revokeLeadership() {

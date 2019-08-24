@@ -402,7 +402,7 @@ public class FakeKinesisBehavioursFactory {
 		 * @param firstShardId first shard id to compare
 		 * @param secondShardId second shard id to compare
 		 * @return a value less than 0 if the first shard id is smaller than the second shard id,
-		 *         or a value larger than 0 the first shard is larger then the second shard id,
+		 *         or a value larger than 0 the first shard is larger than the second shard id,
 		 *         or 0 if they are equal
 		 */
 		private static int compareShardIds(String firstShardId, String secondShardId) {
@@ -499,7 +499,7 @@ public class FakeKinesisBehavioursFactory {
 				String data = queue.take();
 				Record record = new Record()
 					.withData(
-						ByteBuffer.wrap(String.valueOf(data).getBytes(ConfigConstants.DEFAULT_CHARSET)))
+						ByteBuffer.wrap(data.getBytes(ConfigConstants.DEFAULT_CHARSET)))
 					.withPartitionKey(UUID.randomUUID().toString())
 					.withApproximateArrivalTimestamp(new Date(System.currentTimeMillis()))
 					.withSequenceNumber(String.valueOf(0));

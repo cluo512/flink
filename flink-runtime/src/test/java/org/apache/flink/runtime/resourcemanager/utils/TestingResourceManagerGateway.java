@@ -236,16 +236,6 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 	}
 
 	@Override
-	public void registerInfoMessageListener(String infoMessageListenerAddress) {
-
-	}
-
-	@Override
-	public void unRegisterInfoMessageListener(String infoMessageListenerAddress) {
-
-	}
-
-	@Override
 	public CompletableFuture<Acknowledge> deregisterApplication(ApplicationStatus finalStatus, String diagnostics) {
 		return CompletableFuture.completedFuture(Acknowledge.get());
 	}
@@ -303,7 +293,7 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 	}
 
 	@Override
-	public CompletableFuture<Collection<Tuple2<ResourceID, String>>> requestTaskManagerMetricQueryServicePaths(Time timeout) {
+	public CompletableFuture<Collection<Tuple2<ResourceID, String>>> requestTaskManagerMetricQueryServiceAddresses(Time timeout) {
 		return CompletableFuture.completedFuture(Collections.emptyList());
 	}
 

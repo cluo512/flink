@@ -39,6 +39,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
 
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -90,9 +92,11 @@ public class JarRunHandlerTest extends TestLogger {
 					if (expected.isPresent()) {
 						// implies the job was actually submitted
 						assertTrue(expected.get().getMessage().contains("ProgramInvocationException"));
+						// original cause is preserved in stack trace
+						assertThat(expected.get().getMessage(), containsString("ZipException: zip file is empty"));
 						// implies the jar was registered for the job graph (otherwise the jar name would not occur in the exception)
 						// implies the jar was uploaded (otherwise the file would not be found at all)
-						assertTrue(expected.get().getMessage().contains("empty.jar'. zip file is empty"));
+						assertTrue(expected.get().getMessage().contains("empty.jar"));
 					} else {
 						throw e;
 					}

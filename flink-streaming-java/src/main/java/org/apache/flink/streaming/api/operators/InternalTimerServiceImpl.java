@@ -19,9 +19,8 @@
 package org.apache.flink.streaming.api.operators;
 
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.api.common.typeutils.CompatibilityResult;
-import org.apache.flink.api.common.typeutils.CompatibilityUtil;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.runtime.state.InternalPriorityQueue;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
@@ -30,6 +29,7 @@ import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.function.BiConsumerWithException;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -142,26 +142,31 @@ public class InternalTimerServiceImpl<K, N> implements InternalTimerService<N>, 
 
 			// the following is the case where we restore
 			if (restoredTimersSnapshot != null) {
-				CompatibilityResult<K> keySerializerCompatibility = CompatibilityUtil.resolveCompatibilityResult(
-					this.keyDeserializer,
-					null,
-					restoredTimersSnapshot.getKeySerializerConfigSnapshot(),
-					keySerializer);
+				TypeSerializerSchemaCompatibility<K> keySerializerCompatibility =
+					restoredTimersSnapshot.getKeySerializerSnapshot().resolveSchemaCompatibility(keySerializer);
 
-				CompatibilityResult<N> namespaceSerializerCompatibility = CompatibilityUtil.resolveCompatibilityResult(
-					this.namespaceDeserializer,
-					null,
-					restoredTimersSnapshot.getNamespaceSerializerConfigSnapshot(),
-					namespaceSerializer);
-
-				if (keySerializerCompatibility.isRequiresMigration() || namespaceSerializerCompatibility.isRequiresMigration()) {
-					throw new IllegalStateException("Tried to initialize restored TimerService " +
-						"with incompatible serializers than those used to snapshot its state.");
+				if (keySerializerCompatibility.isIncompatible() || keySerializerCompatibility.isCompatibleAfterMigration()) {
+					throw new IllegalStateException(
+						"Tried to initialize restored TimerService with new key serializer that requires migration or is incompatible.");
 				}
+
+				TypeSerializerSchemaCompatibility<N> namespaceSerializerCompatibility =
+					restoredTimersSnapshot.getNamespaceSerializerSnapshot().resolveSchemaCompatibility(namespaceSerializer);
+
+				if (namespaceSerializerCompatibility.isIncompatible() || namespaceSerializerCompatibility.isCompatibleAfterMigration()) {
+					throw new IllegalStateException(
+						"Tried to initialize restored TimerService with new namespace serializer that requires migration or is incompatible.");
+				}
+
+				this.keySerializer = keySerializerCompatibility.isCompatibleAsIs()
+					? keySerializer : keySerializerCompatibility.getReconfiguredSerializer();
+				this.namespaceSerializer = namespaceSerializerCompatibility.isCompatibleAsIs()
+					? namespaceSerializer : namespaceSerializerCompatibility.getReconfiguredSerializer();
+			} else {
+				this.keySerializer = keySerializer;
+				this.namespaceSerializer = namespaceSerializer;
 			}
 
-			this.keySerializer = keySerializer;
-			this.namespaceSerializer = namespaceSerializer;
 			this.keyDeserializer = null;
 			this.namespaceDeserializer = null;
 
@@ -222,6 +227,26 @@ public class InternalTimerServiceImpl<K, N> implements InternalTimerService<N>, 
 	}
 
 	@Override
+	public void forEachEventTimeTimer(BiConsumerWithException<N, Long, Exception> consumer) throws Exception {
+		foreachTimer(consumer, eventTimeTimersQueue);
+	}
+
+	@Override
+	public void forEachProcessingTimeTimer(BiConsumerWithException<N, Long, Exception> consumer) throws Exception {
+		foreachTimer(consumer, processingTimeTimersQueue);
+	}
+
+	private void foreachTimer(BiConsumerWithException<N, Long, Exception> consumer, KeyGroupedInternalPriorityQueue<TimerHeapInternalTimer<K, N>> queue) throws Exception {
+		try (final CloseableIterator<TimerHeapInternalTimer<K, N>> iterator = queue.iterator()) {
+			while (iterator.hasNext()) {
+				final TimerHeapInternalTimer<K, N> timer = iterator.next();
+				keyContext.setCurrentKey(timer.getKey());
+				consumer.accept(timer.getNamespace(), timer.getTimestamp());
+			}
+		}
+	}
+
+	@Override
 	public void onProcessingTime(long time) throws Exception {
 		// null out the timer in case the Triggerable calls registerProcessingTimeTimer()
 		// inside the callback.
@@ -261,11 +286,17 @@ public class InternalTimerServiceImpl<K, N> implements InternalTimerService<N>, 
 	public InternalTimersSnapshot<K, N> snapshotTimersForKeyGroup(int keyGroupIdx) {
 		return new InternalTimersSnapshot<>(
 			keySerializer,
-			keySerializer.snapshotConfiguration(),
 			namespaceSerializer,
-			namespaceSerializer.snapshotConfiguration(),
 			eventTimeTimersQueue.getSubsetForKeyGroup(keyGroupIdx),
 			processingTimeTimersQueue.getSubsetForKeyGroup(keyGroupIdx));
+	}
+
+	public TypeSerializer<K> getKeySerializer() {
+		return keySerializer;
+	}
+
+	public TypeSerializer<N> getNamespaceSerializer() {
+		return namespaceSerializer;
 	}
 
 	/**
@@ -279,13 +310,17 @@ public class InternalTimerServiceImpl<K, N> implements InternalTimerService<N>, 
 	public void restoreTimersForKeyGroup(InternalTimersSnapshot<?, ?> restoredSnapshot, int keyGroupIdx) {
 		this.restoredTimersSnapshot = (InternalTimersSnapshot<K, N>) restoredSnapshot;
 
-		if (areSnapshotSerializersIncompatible(restoredSnapshot)) {
-			throw new IllegalArgumentException("Tried to restore timers " +
-				"for the same service with different serializers.");
+		TypeSerializer<K> restoredKeySerializer = restoredTimersSnapshot.getKeySerializerSnapshot().restoreSerializer();
+		if (this.keyDeserializer != null && !this.keyDeserializer.equals(restoredKeySerializer)) {
+			throw new IllegalArgumentException("Tried to restore timers for the same service with different key serializers.");
 		}
+		this.keyDeserializer = restoredKeySerializer;
 
-		this.keyDeserializer = restoredTimersSnapshot.getKeySerializer();
-		this.namespaceDeserializer = restoredTimersSnapshot.getNamespaceSerializer();
+		TypeSerializer<N> restoredNamespaceSerializer = restoredTimersSnapshot.getNamespaceSerializerSnapshot().restoreSerializer();
+		if (this.namespaceDeserializer != null && !this.namespaceDeserializer.equals(restoredNamespaceSerializer)) {
+			throw new IllegalArgumentException("Tried to restore timers for the same service with different namespace serializers.");
+		}
+		this.namespaceDeserializer = restoredNamespaceSerializer;
 
 		checkArgument(localKeyGroupRange.contains(keyGroupIdx),
 			"Key Group " + keyGroupIdx + " does not belong to the local range.");
@@ -353,10 +388,5 @@ public class InternalTimerServiceImpl<K, N> implements InternalTimerService<N>, 
 			result.add(Collections.unmodifiableSet(keyGroupedQueue.getSubsetForKeyGroup(keyGroup)));
 		}
 		return result;
-	}
-
-	private boolean areSnapshotSerializersIncompatible(InternalTimersSnapshot<?, ?> restoredSnapshot) {
-		return (this.keyDeserializer != null && !this.keyDeserializer.equals(restoredSnapshot.getKeySerializer())) ||
-			(this.namespaceDeserializer != null && !this.namespaceDeserializer.equals(restoredSnapshot.getNamespaceSerializer()));
 	}
 }

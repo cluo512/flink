@@ -24,22 +24,26 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable
 import org.apache.calcite.tools.RelBuilder
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo._
 import org.apache.flink.api.common.typeinfo.TypeInformation
-import org.apache.flink.table.api.StreamTableEnvironment
+import org.apache.flink.table.calcite.FlinkRelBuilder
+import org.apache.flink.table.operations.QueryOperation
 import org.apache.flink.table.typeutils.TypeCheckUtils._
 import org.apache.flink.table.validate.{ValidationFailure, ValidationResult, ValidationSuccess}
 
-case class In(expression: Expression, elements: Seq[Expression]) extends Expression  {
+case class In(expression: PlannerExpression, elements: Seq[PlannerExpression])
+  extends PlannerExpression  {
 
   override def toString = s"$expression.in(${elements.mkString(", ")})"
 
-  override private[flink] def children: Seq[Expression] = expression +: elements.distinct
+  override private[flink] def children: Seq[PlannerExpression] = expression +: elements.distinct
 
   override private[flink] def toRexNode(implicit relBuilder: RelBuilder): RexNode = {
     // check if this is a sub-query expression or an element list
     elements.head match {
 
-      case TableReference(name, table) =>
-        RexSubQuery.in(table.getRelNode, ImmutableList.of(expression.toRexNode))
+      case TableReference(_, tableOperation: QueryOperation) =>
+        RexSubQuery.in(
+          relBuilder.asInstanceOf[FlinkRelBuilder].tableOperation(tableOperation).build(),
+          ImmutableList.of(expression.toRexNode))
 
       case _ =>
         relBuilder.call(SqlStdOperatorTable.IN, children.map(_.toRexNode): _*)
@@ -50,16 +54,16 @@ case class In(expression: Expression, elements: Seq[Expression]) extends Express
     // check if this is a sub-query expression or an element list
     elements.head match {
 
-      case TableReference(name, table) =>
+      case TableReference(name, tableOperation: QueryOperation) =>
         if (elements.length != 1) {
           return ValidationFailure("IN operator supports only one table reference.")
         }
-        val tableOutput = table.logicalPlan.output
-        if (tableOutput.length > 1) {
+        val tableSchema = tableOperation.getTableSchema
+        if (tableSchema.getFieldCount > 1) {
           return ValidationFailure(
             s"The sub-query table '$name' must not have more than one column.")
         }
-        (expression.resultType, tableOutput.head.resultType) match {
+        (expression.resultType, tableSchema.getFieldType(0).get()) match {
           case (lType, rType) if lType == rType => ValidationSuccess
           case (lType, rType) if isNumeric(lType) && isNumeric(rType) => ValidationSuccess
           case (lType, rType) if isArray(lType) && lType.getTypeClass == rType.getTypeClass =>

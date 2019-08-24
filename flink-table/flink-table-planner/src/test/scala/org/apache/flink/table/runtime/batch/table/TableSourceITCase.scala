@@ -27,7 +27,7 @@ import org.apache.flink.api.java.typeutils.{GenericTypeInfo, RowTypeInfo}
 import org.apache.flink.api.java.{DataSet, ExecutionEnvironment => JExecEnv}
 import org.apache.flink.api.scala.ExecutionEnvironment
 import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{TableException, TableSchema, Types}
+import org.apache.flink.table.api.{TableException, TableSchema, Tumble, Types}
 import org.apache.flink.table.runtime.utils.TableProgramsTestBase.TableConfigMode
 import org.apache.flink.table.runtime.utils.{CommonTestData, TableProgramsCollectionTestBase}
 import org.apache.flink.table.sources.BatchTableSource
@@ -70,6 +70,39 @@ class TableSourceITCase(
       .collect()
 
     // test should fail because type info of returned DataSet does not match type return type info.
+  }
+
+  @Test
+  def testBoundedTableSource(): Unit = {
+    val tableName = "MyTable"
+    val env = ExecutionEnvironment.getExecutionEnvironment
+    val tEnv = BatchTableEnvironment.create(env)
+
+    val data = Seq(
+      Row.of("Mary", new JLong(1L), new JInt(10)),
+      Row.of("Bob", new JLong(2L), new JInt(20)),
+      Row.of("Mary", new JLong(2L), new JInt(30)),
+      Row.of("Liz", new JLong(2001L), new JInt(40)))
+
+    val fieldNames = Array("name", "rtime", "amount")
+    val schema = new TableSchema(fieldNames, Array(Types.STRING, Types.LONG(), Types.INT))
+    val rowType = new RowTypeInfo(
+      Array(Types.STRING, Types.LONG, Types.INT).asInstanceOf[Array[TypeInformation[_]]],
+      fieldNames)
+
+    val tableSource = new TestInputFormatTableSource(schema, rowType, data)
+    tEnv.registerTableSource(tableName, tableSource)
+
+    val results = tEnv.scan(tableName)
+      .groupBy('name)
+      .select('name, 'amount.sum)
+      .collect()
+
+    val expected = Seq(
+      "Mary,40",
+      "Bob,20",
+      "Liz,40").mkString("\n")
+    TestBaseUtils.compareResultAsText(results.asJava, expected)
   }
 
   @Test

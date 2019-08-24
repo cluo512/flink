@@ -57,6 +57,7 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.net.BindException;
 import java.net.InetSocketAddress;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -106,7 +107,7 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 		this.sslHandlerFactory = configuration.getSslHandlerFactory();
 
 		this.uploadDir = configuration.getUploadDir();
-		createUploadDir(uploadDir, log);
+		createUploadDir(uploadDir, log, true);
 
 		this.maxContentLength = configuration.getMaxContentLength();
 		this.responseHeaders = configuration.getResponseHeaders();
@@ -161,7 +162,7 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 					RouterHandler handler = new RouterHandler(router, responseHeaders);
 
 					// SSL should be the first handler in the pipeline
-					if (sslHandlerFactory != null) {
+					if (isHttpsEnabled()) {
 						ch.pipeline().addLast("ssl",
 							new RedirectingSslHandler(restAddress, restAddressFuture, sslHandlerFactory));
 					}
@@ -231,15 +232,7 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 
 			log.info("Rest endpoint listening at {}:{}", advertisedAddress, port);
 
-			final String protocol;
-
-			if (sslHandlerFactory != null) {
-				protocol = "https://";
-			} else {
-				protocol = "http://";
-			}
-
-			restBaseUrl = protocol + advertisedAddress + ':' + port;
+			restBaseUrl = new URL(determineProtocol(), advertisedAddress, port, "").toString();
 
 			restAddressFuture.complete(restBaseUrl);
 
@@ -409,6 +402,14 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 		}
 	}
 
+	private boolean isHttpsEnabled() {
+		return sslHandlerFactory != null;
+	}
+
+	private String determineProtocol() {
+		return isHttpsEnabled() ? "https" : "http";
+	}
+
 	private static void registerHandler(Router router, Tuple2<RestHandlerSpecification, ChannelInboundHandler> specificationHandler, Logger log) {
 		final String handlerURL = specificationHandler.f0.getTargetRestEndpointURL();
 		// setup versioned urls
@@ -447,10 +448,14 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 	 * Creates the upload dir if needed.
 	 */
 	@VisibleForTesting
-	static void createUploadDir(final Path uploadDir, final Logger log) throws IOException {
+	static void createUploadDir(final Path uploadDir, final Logger log, final boolean initialCreation) throws IOException {
 		if (!Files.exists(uploadDir)) {
-			log.warn("Upload directory {} does not exist, or has been deleted externally. " +
-				"Previously uploaded files are no longer available.", uploadDir);
+			if (initialCreation) {
+				log.info("Upload directory {} does not exist. ", uploadDir);
+			} else {
+				log.warn("Upload directory {} has been deleted externally. " +
+					"Previously uploaded files are no longer available.", uploadDir);
+			}
 			checkAndCreateUploadDir(uploadDir, log);
 		}
 	}

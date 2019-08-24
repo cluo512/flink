@@ -175,7 +175,7 @@ class JoinITCase(
     val ds3 = CollectionDataSets.getSmall3TupleDataSet(env).toTable(tEnv, 'j, 'k, 'l)
 
     val joinT = ds1.join(ds2)
-      .where(Literal(true))
+      .where(true)
       .join(ds3)
       .where('a === 'd && 'e === 'k)
       .select('a, 'f, 'l)
@@ -466,7 +466,7 @@ class JoinITCase(
     val ds1 = env.fromCollection(data).toTable(tEnv, 'a)
     val func2 = new TableFunc2
 
-    val joinDs = ds1.join(func2('a) as ('name, 'len))
+    val joinDs = ds1.joinLateral(func2('a) as ('name, 'len))
 
     val results = joinDs.toDataSet[Row].collect()
     val expected = Seq(

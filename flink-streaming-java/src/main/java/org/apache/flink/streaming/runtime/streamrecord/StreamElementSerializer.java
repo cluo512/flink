@@ -254,15 +254,10 @@ public final class StreamElementSerializer<T> extends TypeSerializer<StreamEleme
 		if (obj instanceof StreamElementSerializer) {
 			StreamElementSerializer<?> other = (StreamElementSerializer<?>) obj;
 
-			return other.canEqual(this) && typeSerializer.equals(other.typeSerializer);
+			return typeSerializer.equals(other.typeSerializer);
 		} else {
 			return false;
 		}
-	}
-
-	@Override
-	public boolean canEqual(Object obj) {
-		return obj instanceof StreamElementSerializer;
 	}
 
 	@Override
@@ -319,7 +314,7 @@ public final class StreamElementSerializer<T> extends TypeSerializer<StreamEleme
 
 		@SuppressWarnings("WeakerAccess")
 		public StreamElementSerializerSnapshot() {
-			super(serializerClass());
+			super(StreamElementSerializer.class);
 		}
 
 		StreamElementSerializerSnapshot(StreamElementSerializer<T> serializerInstance) {
@@ -342,12 +337,6 @@ public final class StreamElementSerializer<T> extends TypeSerializer<StreamEleme
 			TypeSerializer<T> casted = (TypeSerializer<T>) nestedSerializers[0];
 
 			return new StreamElementSerializer<>(casted);
-		}
-
-		@SuppressWarnings("unchecked")
-		private static <T> Class<StreamElementSerializer<T>> serializerClass() {
-			Class<?> streamElementSerializerClass = StreamElementSerializer.class;
-			return (Class<StreamElementSerializer<T>>) streamElementSerializerClass;
 		}
 	}
 }

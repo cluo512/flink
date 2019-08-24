@@ -36,6 +36,7 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.Utils;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.io.CsvOutputFormat;
@@ -66,7 +67,6 @@ import org.apache.flink.streaming.api.operators.StreamMap;
 import org.apache.flink.streaming.api.operators.StreamSink;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 import org.apache.flink.streaming.api.transformations.PartitionTransformation;
-import org.apache.flink.streaming.api.transformations.StreamTransformation;
 import org.apache.flink.streaming.api.transformations.UnionTransformation;
 import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
@@ -114,7 +114,7 @@ public class DataStream<T> {
 
 	protected final StreamExecutionEnvironment environment;
 
-	protected final StreamTransformation<T> transformation;
+	protected final Transformation<T> transformation;
 
 	/**
 	 * Create a new {@link DataStream} in the given execution environment with
@@ -122,7 +122,7 @@ public class DataStream<T> {
 	 *
 	 * @param environment The StreamExecutionEnvironment
 	 */
-	public DataStream(StreamExecutionEnvironment environment, StreamTransformation<T> transformation) {
+	public DataStream(StreamExecutionEnvironment environment, Transformation<T> transformation) {
 		this.environment = Preconditions.checkNotNull(environment, "Execution Environment must not be null.");
 		this.transformation = Preconditions.checkNotNull(transformation, "Stream Transformation must not be null.");
 	}
@@ -210,7 +210,7 @@ public class DataStream<T> {
 	 */
 	@SafeVarargs
 	public final DataStream<T> union(DataStream<T>... streams) {
-		List<StreamTransformation<T>> unionedTransforms = new ArrayList<>();
+		List<Transformation<T>> unionedTransforms = new ArrayList<>();
 		unionedTransforms.add(this.transformation);
 
 		for (DataStream<T> newStream : streams) {
@@ -234,7 +234,7 @@ public class DataStream<T> {
 	 *            {@link org.apache.flink.streaming.api.collector.selector.OutputSelector}
 	 *            for directing the tuples.
 	 * @return The {@link SplitStream}
-	 * @deprecated Please use side ouput instead.
+	 * @deprecated Please use side output instead.
 	 */
 	@Deprecated
 	public SplitStream<T> split(OutputSelector<T> outputSelector) {
@@ -349,7 +349,7 @@ public class DataStream<T> {
 	 * <p>Note: This method works only on single field keys.
 	 *
 	 * @param partitioner The partitioner to assign partitions to keys.
-	 * @param field The field index on which the DataStream is to partitioned.
+	 * @param field The field index on which the DataStream is partitioned.
 	 * @return The partitioned DataStream.
 	 */
 	public <K> DataStream<T> partitionCustom(Partitioner<K> partitioner, int field) {
@@ -364,7 +364,7 @@ public class DataStream<T> {
 	 * <p>Note: This method works only on single field keys.
 	 *
 	 * @param partitioner The partitioner to assign partitions to keys.
-	 * @param field The expression for the field on which the DataStream is to partitioned.
+	 * @param field The expression for the field on which the DataStream is partitioned.
 	 * @return The partitioned DataStream.
 	 */
 	public <K> DataStream<T> partitionCustom(Partitioner<K> partitioner, String field) {
@@ -405,7 +405,7 @@ public class DataStream<T> {
 
 	/**
 	 * Sets the partitioning of the {@link DataStream} so that the output elements
-	 * are broadcast to every parallel instance of the next operation.
+	 * are broadcasted to every parallel instance of the next operation.
 	 *
 	 * @return The DataStream with broadcast partitioning set.
 	 */
@@ -797,10 +797,10 @@ public class DataStream<T> {
 	}
 
 	/**
-	 * Windows this data stream to a {@code KeyedTriggerWindowDataStream}, which evaluates windows
-	 * over a key grouped stream. Elements are put into windows by a
+	 * Windows this data stream to a {@code AllWindowedStream}, which evaluates windows
+	 * over a non key grouped stream. Elements are put into windows by a
 	 * {@link org.apache.flink.streaming.api.windowing.assigners.WindowAssigner}. The grouping of
-	 * elements is done both by key and by window.
+	 * elements is done by window.
 	 *
 	 * <p>A {@link org.apache.flink.streaming.api.windowing.triggers.Trigger} can be defined to specify
 	 * when windows are evaluated. However, {@code WindowAssigners} have a default {@code Trigger}
@@ -1233,13 +1233,13 @@ public class DataStream<T> {
 	}
 
 	/**
-	 * Returns the {@link StreamTransformation} that represents the operation that logically creates
+	 * Returns the {@link Transformation} that represents the operation that logically creates
 	 * this {@link DataStream}.
 	 *
 	 * @return The Transformation
 	 */
 	@Internal
-	public StreamTransformation<T> getTransformation() {
+	public Transformation<T> getTransformation() {
 		return transformation;
 	}
 }

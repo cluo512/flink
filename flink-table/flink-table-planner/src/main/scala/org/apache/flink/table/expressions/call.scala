@@ -26,37 +26,15 @@ import org.apache.calcite.sql._
 import org.apache.calcite.sql.`type`.OrdinalReturnTypeInference
 import org.apache.calcite.sql.parser.SqlParserPos
 import org.apache.calcite.tools.RelBuilder
-import org.apache.flink.api.common.typeinfo.TypeInformation
+import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, TypeInformation}
 import org.apache.flink.table.api._
 import org.apache.flink.table.calcite.FlinkTypeFactory
-import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils._
 import org.apache.flink.table.functions._
-import org.apache.flink.table.plan.logical.{LogicalNode, LogicalTableFunctionCall}
+import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils._
+import org.apache.flink.table.typeutils.TimeIntervalTypeInfo
 import org.apache.flink.table.validate.{ValidationFailure, ValidationResult, ValidationSuccess}
-import org.apache.flink.table.typeutils.{RowIntervalTypeInfo, TimeIntervalTypeInfo}
 
 import _root_.scala.collection.JavaConverters._
-
-/**
-  * General expression for unresolved function calls. The function can be a built-in
-  * scalar function or a user-defined scalar function.
-  */
-case class Call(functionName: String, args: Seq[Expression]) extends Expression {
-
-  override private[flink] def children: Seq[Expression] = args
-
-  override private[flink] def toRexNode(implicit relBuilder: RelBuilder): RexNode = {
-    throw UnresolvedException(s"trying to convert UnresolvedFunction $functionName to RexNode")
-  }
-
-  override def toString = s"\\$functionName(${args.mkString(", ")})"
-
-  override private[flink] def resultType =
-    throw UnresolvedException(s"calling resultType on UnresolvedFunction $functionName")
-
-  override private[flink] def validateInput(): ValidationResult =
-    ValidationFailure(s"Unresolved function call: $functionName")
-}
 
 /**
   * Over call with unresolved alias for over window.
@@ -64,7 +42,8 @@ case class Call(functionName: String, args: Seq[Expression]) extends Expression 
   * @param agg The aggregation of the over call.
   * @param alias The alias of the referenced over window.
   */
-case class UnresolvedOverCall(agg: Expression, alias: Expression) extends Expression {
+case class UnresolvedOverCall(agg: PlannerExpression, alias: PlannerExpression)
+  extends PlannerExpression {
 
   override private[flink] def validateInput() =
     ValidationFailure(s"Over window with alias $alias could not be resolved.")
@@ -84,11 +63,11 @@ case class UnresolvedOverCall(agg: Expression, alias: Expression) extends Expres
   * @param following      The upper bound of the window
   */
 case class OverCall(
-    agg: Expression,
-    partitionBy: Seq[Expression],
-    orderBy: Expression,
-    preceding: Expression,
-    following: Expression) extends Expression {
+    agg: PlannerExpression,
+    partitionBy: Seq[PlannerExpression],
+    orderBy: PlannerExpression,
+    preceding: PlannerExpression,
+    following: PlannerExpression) extends PlannerExpression {
 
   override def toString: String = s"$agg OVER (" +
     s"PARTITION BY (${partitionBy.mkString(", ")}) " +
@@ -117,7 +96,7 @@ case class OverCall(
     val partitionKeys = partitionBy.map(_.toRexNode).asJava
 
     // assemble bounds
-    val isPhysical: Boolean = preceding.resultType.isInstanceOf[RowIntervalTypeInfo]
+    val isPhysical: Boolean = preceding.resultType == BasicTypeInfo.LONG_TYPE_INFO
 
     val lowerBound = createBound(relBuilder, preceding, SqlKind.PRECEDING)
     val upperBound = createBound(relBuilder, following, SqlKind.FOLLOWING)
@@ -139,7 +118,7 @@ case class OverCall(
 
   private def createBound(
     relBuilder: RelBuilder,
-    bound: Expression,
+    bound: PlannerExpression,
     sqlKind: SqlKind): RexWindowBound = {
 
     bound match {
@@ -176,7 +155,7 @@ case class OverCall(
     }
   }
 
-  override private[flink] def children: Seq[Expression] =
+  override private[flink] def children: Seq[PlannerExpression] =
     Seq(agg) ++ Seq(orderBy) ++ partitionBy ++ Seq(preceding) ++ Seq(following)
 
   override private[flink] def resultType = agg.resultType
@@ -193,9 +172,9 @@ case class OverCall(
 
     // check partitionBy expression keys are resolved field reference
     partitionBy.foreach {
-      case r: ResolvedFieldReference if r.resultType.isKeyType  =>
+      case r: PlannerResolvedFieldReference if r.resultType.isKeyType  =>
         ValidationSuccess
-      case r: ResolvedFieldReference =>
+      case r: PlannerResolvedFieldReference =>
         return ValidationFailure(s"Invalid PartitionBy expression: $r. " +
           s"Expression must return key type.")
       case r =>
@@ -207,9 +186,9 @@ case class OverCall(
     preceding match {
       case _: CurrentRow | _: CurrentRange | _: UnboundedRow | _: UnboundedRange =>
         ValidationSuccess
-      case Literal(v: Long, _: RowIntervalTypeInfo) if v > 0 =>
+      case Literal(v: Long, BasicTypeInfo.LONG_TYPE_INFO) if v > 0 =>
         ValidationSuccess
-      case Literal(_, _: RowIntervalTypeInfo) =>
+      case Literal(_, BasicTypeInfo.LONG_TYPE_INFO) =>
         return ValidationFailure("Preceding row interval must be larger than 0.")
       case Literal(v: Long, _: TimeIntervalTypeInfo[_]) if v >= 0 =>
         ValidationSuccess
@@ -223,9 +202,9 @@ case class OverCall(
     following match {
       case _: CurrentRow | _: CurrentRange | _: UnboundedRow | _: UnboundedRange =>
         ValidationSuccess
-      case Literal(v: Long, _: RowIntervalTypeInfo) if v > 0 =>
+      case Literal(v: Long, BasicTypeInfo.LONG_TYPE_INFO) if v > 0 =>
         ValidationSuccess
-      case Literal(_, _: RowIntervalTypeInfo) =>
+      case Literal(_, BasicTypeInfo.LONG_TYPE_INFO) =>
         return ValidationFailure("Following row interval must be larger than 0.")
       case Literal(v: Long, _: TimeIntervalTypeInfo[_]) if v >= 0 =>
         ValidationSuccess
@@ -237,14 +216,14 @@ case class OverCall(
 
     // check that preceding and following are of same type
     (preceding, following) match {
-      case (p: Expression, f: Expression) if p.resultType == f.resultType =>
+      case (p: PlannerExpression, f: PlannerExpression) if p.resultType == f.resultType =>
         ValidationSuccess
       case _ =>
         return ValidationFailure("Preceding and following must be of same interval type.")
     }
 
     // check time field
-    if (!ExpressionUtils.isTimeAttribute(orderBy)) {
+    if (!PlannerExpressionUtils.isTimeAttribute(orderBy)) {
       return ValidationFailure("Ordering must be defined on a time attribute.")
     }
 
@@ -258,14 +237,14 @@ case class OverCall(
   * @param scalarFunction scalar function to be called (might be overloaded)
   * @param parameters actual parameters that determine target evaluation method
   */
-case class ScalarFunctionCall(
+case class PlannerScalarFunctionCall(
     scalarFunction: ScalarFunction,
-    parameters: Seq[Expression])
-  extends Expression {
+    parameters: Seq[PlannerExpression])
+  extends PlannerExpression {
 
   private var foundSignature: Option[Array[Class[_]]] = None
 
-  override private[flink] def children: Seq[Expression] = parameters
+  override private[flink] def children: Seq[PlannerExpression] = parameters
 
   override private[flink] def toRexNode(implicit relBuilder: RelBuilder): RexNode = {
     val typeFactory = relBuilder.getTypeFactory.asInstanceOf[FlinkTypeFactory]
@@ -309,73 +288,31 @@ case class ScalarFunctionCall(
   * @param parameters actual parameters of function
   * @param resultType type information of returned table
   */
-case class TableFunctionCall(
+case class PlannerTableFunctionCall(
     functionName: String,
     tableFunction: TableFunction[_],
-    parameters: Seq[Expression],
+    parameters: Seq[PlannerExpression],
     resultType: TypeInformation[_])
-  extends Expression {
+  extends PlannerExpression {
 
-  private var aliases: Option[Seq[String]] = None
+  override private[flink] def children: Seq[PlannerExpression] = parameters
 
-  override private[flink] def children: Seq[Expression] = parameters
-
-  /**
-    * Assigns an alias for this table function's returned fields that the following operator
-    * can refer to.
-    *
-    * @param aliasList alias for this table function's returned fields
-    * @return this table function call
-    */
-  private[flink] def setAliases(aliasList: Seq[String]): TableFunctionCall = {
-    this.aliases = Some(aliasList)
-    this
-  }
-
-  /**
-    * Specifies the field names for a join with a table function.
-    *
-    * @param name name for one field
-    * @param extraNames additional names if the expression expands to multiple fields
-    * @return field with an alias
-    */
-  def as(name: Symbol, extraNames: Symbol*): TableFunctionCall = {
-    // NOTE: this method is only a temporary solution until we
-    // remove the deprecated table constructor. Otherwise Scala would be confused
-    // about Table.as() and Expression.as(). In the future, we can rely on Expression.as() only.
-    this.aliases = Some(name.name +: extraNames.map(_.name))
-    this
-  }
-
-  /**
-    * Converts an API class to a logical node for planning.
-    */
-  private[flink] def toLogicalTableFunctionCall(child: LogicalNode): LogicalTableFunctionCall = {
-    val originNames = getFieldInfo(resultType)._1
-
-    // determine the final field names
-    val fieldNames = if (aliases.isDefined) {
-      val aliasList = aliases.get
-      if (aliasList.length != originNames.length) {
-        throw new ValidationException(
-          s"List of column aliases must have same degree as table; " +
-            s"the returned table of function '$functionName' has ${originNames.length} " +
-            s"columns (${originNames.mkString(",")}), " +
-            s"whereas alias list has ${aliasList.length} columns")
-      } else {
-        aliasList.toArray
-      }
+  override def validateInput(): ValidationResult = {
+    // check if not Scala object
+    UserFunctionsTypeHelper.validateNotSingleton(tableFunction.getClass)
+    // check if class could be instantiated
+    UserFunctionsTypeHelper.validateInstantiation(tableFunction.getClass)
+    // look for a signature that matches the input types
+    val signature = parameters.map(_.resultType)
+    val foundMethod = getUserDefinedMethod(tableFunction, "eval", typeInfoToClass(signature))
+    if (foundMethod.isEmpty) {
+      ValidationFailure(
+        s"Given parameters of function '$functionName' do not match any signature. \n" +
+          s"Actual: ${signatureToString(signature)} \n" +
+          s"Expected: ${signaturesToString(tableFunction, "eval")}")
     } else {
-      originNames
+      ValidationSuccess
     }
-
-    LogicalTableFunctionCall(
-      functionName,
-      tableFunction,
-      parameters,
-      resultType,
-      fieldNames,
-      child)
   }
 
   override def toString =
