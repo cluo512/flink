@@ -39,6 +39,8 @@ import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
+import org.apache.flink.runtime.jobgraph.topology.DefaultLogicalTopology;
+import org.apache.flink.runtime.jobgraph.topology.LogicalPipelinedRegion;
 import org.apache.flink.runtime.jobmanager.scheduler.CoLocationGroup;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.operators.util.TaskConfig;
@@ -69,13 +71,18 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 
 import static org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration.MINIMAL_CHECKPOINT_TIME;
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * The StreamingJobGraphGenerator converts a {@link StreamGraph} into a {@link JobGraph}.
@@ -117,10 +124,6 @@ public class StreamingJobGraphGenerator {
 
 	private final StreamGraphHasher defaultStreamGraphHasher;
 	private final List<StreamGraphHasher> legacyStreamGraphHashers;
-
-	private StreamingJobGraphGenerator(StreamGraph streamGraph) {
-		this(streamGraph, null);
-	}
 
 	private StreamingJobGraphGenerator(StreamGraph streamGraph, @Nullable JobID jobID) {
 		this.streamGraph = streamGraph;
@@ -164,7 +167,15 @@ public class StreamingJobGraphGenerator {
 
 		setSlotSharingAndCoLocation();
 
+		setManagedMemoryFraction(
+			Collections.unmodifiableMap(jobVertices),
+			Collections.unmodifiableMap(vertexConfigs),
+			Collections.unmodifiableMap(chainedConfigs),
+			id -> streamGraph.getStreamNode(id).getMinResources());
+
 		configureCheckpointing();
+
+		jobGraph.setSavepointRestoreSettings(streamGraph.getSavepointRestoreSettings());
 
 		JobGraphGenerator.addUserArtifactEntries(streamGraph.getUserArtifacts(), jobGraph);
 
@@ -598,25 +609,70 @@ public class StreamingJobGraphGenerator {
 	}
 
 	private void setSlotSharingAndCoLocation() {
-		final HashMap<String, SlotSharingGroup> slotSharingGroups = new HashMap<>();
-		final HashMap<String, Tuple2<SlotSharingGroup, CoLocationGroup>> coLocationGroups = new HashMap<>();
+		setSlotSharing();
+		setCoLocation();
+	}
+
+	private void setSlotSharing() {
+		final Map<String, SlotSharingGroup> specifiedSlotSharingGroups = new HashMap<>();
+		final Map<JobVertexID, SlotSharingGroup> vertexRegionSlotSharingGroups = buildVertexRegionSlotSharingGroups();
+
+		for (Entry<Integer, JobVertex> entry : jobVertices.entrySet()) {
+
+			final JobVertex vertex = entry.getValue();
+			final String slotSharingGroupKey = streamGraph.getStreamNode(entry.getKey()).getSlotSharingGroup();
+
+			final SlotSharingGroup effectiveSlotSharingGroup;
+			if (slotSharingGroupKey == null) {
+				effectiveSlotSharingGroup = null;
+			} else if (slotSharingGroupKey.equals(StreamGraphGenerator.DEFAULT_SLOT_SHARING_GROUP)) {
+				// fallback to the region slot sharing group by default
+				effectiveSlotSharingGroup = vertexRegionSlotSharingGroups.get(vertex.getID());
+			} else {
+				effectiveSlotSharingGroup = specifiedSlotSharingGroups.computeIfAbsent(
+					slotSharingGroupKey, k -> new SlotSharingGroup());
+			}
+
+			vertex.setSlotSharingGroup(effectiveSlotSharingGroup);
+		}
+	}
+
+	/**
+	 * Maps a vertex to its region slot sharing group.
+	 * If {@link StreamGraph#isAllVerticesInSameSlotSharingGroupByDefault()}
+	 * returns true, all regions will be in the same slot sharing group.
+	 */
+	private Map<JobVertexID, SlotSharingGroup> buildVertexRegionSlotSharingGroups() {
+		final Map<JobVertexID, SlotSharingGroup> vertexRegionSlotSharingGroups = new HashMap<>();
+		final SlotSharingGroup defaultSlotSharingGroup = new SlotSharingGroup();
+
+		final boolean allRegionsInSameSlotSharingGroup = streamGraph.isAllVerticesInSameSlotSharingGroupByDefault();
+
+		final Set<LogicalPipelinedRegion> regions = new DefaultLogicalTopology(jobGraph).getLogicalPipelinedRegions();
+		for (LogicalPipelinedRegion region : regions) {
+			final SlotSharingGroup regionSlotSharingGroup;
+			if (allRegionsInSameSlotSharingGroup) {
+				regionSlotSharingGroup = defaultSlotSharingGroup;
+			} else {
+				regionSlotSharingGroup = new SlotSharingGroup();
+			}
+
+			for (JobVertexID jobVertexID : region.getVertexIDs()) {
+				vertexRegionSlotSharingGroups.put(jobVertexID, regionSlotSharingGroup);
+			}
+		}
+
+		return vertexRegionSlotSharingGroups;
+	}
+
+	private void setCoLocation() {
+		final Map<String, Tuple2<SlotSharingGroup, CoLocationGroup>> coLocationGroups = new HashMap<>();
 
 		for (Entry<Integer, JobVertex> entry : jobVertices.entrySet()) {
 
 			final StreamNode node = streamGraph.getStreamNode(entry.getKey());
 			final JobVertex vertex = entry.getValue();
-
-			// configure slot sharing group
-			final String slotSharingGroupKey = node.getSlotSharingGroup();
-			final SlotSharingGroup sharingGroup;
-
-			if (slotSharingGroupKey != null) {
-				sharingGroup = slotSharingGroups.computeIfAbsent(
-						slotSharingGroupKey, (k) -> new SlotSharingGroup());
-				vertex.setSlotSharingGroup(sharingGroup);
-			} else {
-				sharingGroup = null;
-			}
+			final SlotSharingGroup sharingGroup = vertex.getSlotSharingGroup();
 
 			// configure co-location constraint
 			final String coLocationGroupKey = node.getCoLocationGroup();
@@ -626,7 +682,7 @@ public class StreamingJobGraphGenerator {
 				}
 
 				Tuple2<SlotSharingGroup, CoLocationGroup> constraint = coLocationGroups.computeIfAbsent(
-						coLocationGroupKey, (k) -> new Tuple2<>(sharingGroup, new CoLocationGroup()));
+						coLocationGroupKey, k -> new Tuple2<>(sharingGroup, new CoLocationGroup()));
 
 				if (constraint.f0 != sharingGroup) {
 					throw new IllegalStateException("Cannot co-locate operators from different slot sharing groups");
@@ -636,6 +692,111 @@ public class StreamingJobGraphGenerator {
 				constraint.f1.addVertex(vertex);
 			}
 		}
+	}
+
+	private static void setManagedMemoryFraction(
+			final Map<Integer, JobVertex> jobVertices,
+			final Map<Integer, StreamConfig> operatorConfigs,
+			final Map<Integer, Map<Integer, StreamConfig>> vertexChainedConfigs,
+			final java.util.function.Function<Integer, ResourceSpec> operatorResourceRetriever) {
+
+		// all slot sharing groups in this job
+		final Set<SlotSharingGroup> slotSharingGroups = Collections.newSetFromMap(new IdentityHashMap<>());
+
+		// maps a job vertex ID to its head operator ID
+		final Map<JobVertexID, Integer> vertexHeadOperators = new HashMap<>();
+
+		// maps a job vertex ID to IDs of all operators in the vertex
+		final Map<JobVertexID, Set<Integer>> vertexOperators = new HashMap<>();
+
+		for (Entry<Integer, JobVertex> entry : jobVertices.entrySet()) {
+			final int headOperatorId = entry.getKey();
+			final JobVertex jobVertex = entry.getValue();
+
+			final SlotSharingGroup jobVertexSlotSharingGroup = jobVertex.getSlotSharingGroup();
+
+			checkState(jobVertexSlotSharingGroup != null, "JobVertex slot sharing group must not be null");
+			slotSharingGroups.add(jobVertexSlotSharingGroup);
+
+			vertexHeadOperators.put(jobVertex.getID(), headOperatorId);
+
+			final Set<Integer> operatorIds = new HashSet<>();
+			operatorIds.add(headOperatorId);
+			operatorIds.addAll(vertexChainedConfigs.getOrDefault(headOperatorId, Collections.emptyMap()).keySet());
+			vertexOperators.put(jobVertex.getID(), operatorIds);
+		}
+
+		for (SlotSharingGroup slotSharingGroup : slotSharingGroups) {
+			setManagedMemoryFractionForSlotSharingGroup(
+				slotSharingGroup,
+				vertexHeadOperators,
+				vertexOperators,
+				operatorConfigs,
+				vertexChainedConfigs,
+				operatorResourceRetriever);
+		}
+	}
+
+	private static void setManagedMemoryFractionForSlotSharingGroup(
+			final SlotSharingGroup slotSharingGroup,
+			final Map<JobVertexID, Integer> vertexHeadOperators,
+			final Map<JobVertexID, Set<Integer>> vertexOperators,
+			final Map<Integer, StreamConfig> operatorConfigs,
+			final Map<Integer, Map<Integer, StreamConfig>> vertexChainedConfigs,
+			final java.util.function.Function<Integer, ResourceSpec> operatorResourceRetriever) {
+
+		final int groupOperatorCount = slotSharingGroup.getJobVertexIds().stream()
+			.map(vertexOperators::get)
+			.mapToInt(Collection::size)
+			.sum();
+
+		for (JobVertexID jobVertexID : slotSharingGroup.getJobVertexIds()) {
+			for (int operatorNodeId : vertexOperators.get(jobVertexID)) {
+				final StreamConfig operatorConfig = operatorConfigs.get(operatorNodeId);
+				final ResourceSpec operatorResourceSpec = operatorResourceRetriever.apply(operatorNodeId);
+				setManagedMemoryFractionForOperator(
+					operatorResourceSpec,
+					slotSharingGroup.getResourceSpec(),
+					groupOperatorCount,
+					operatorConfig);
+			}
+
+			// need to refresh the chained task configs because they are serialized
+			final int headOperatorNodeId = vertexHeadOperators.get(jobVertexID);
+			final StreamConfig vertexConfig = operatorConfigs.get(headOperatorNodeId);
+			vertexConfig.setTransitiveChainedTaskConfigs(vertexChainedConfigs.get(headOperatorNodeId));
+		}
+	}
+
+	private static void setManagedMemoryFractionForOperator(
+			final ResourceSpec operatorResourceSpec,
+			final ResourceSpec groupResourceSpec,
+			final int groupOperatorCount,
+			final StreamConfig operatorConfig) {
+
+		final double managedMemoryFractionOnHeap;
+		final double managedMemoryFractionOffHeap;
+
+		if (groupResourceSpec.equals(ResourceSpec.UNKNOWN)) {
+			checkArgument(groupOperatorCount > 0, "A slot sharing group must contain at least 1 operator");
+
+			managedMemoryFractionOnHeap = 1.0 / groupOperatorCount;
+			managedMemoryFractionOffHeap = 1.0 / groupOperatorCount;
+		} else {
+			final long groupOnHeapManagedMemoryBytes = groupResourceSpec.getOnHeapManagedMemory().getBytes();
+			final long groupOffHeapManagedMemoryBytes = groupResourceSpec.getOffHeapManagedMemory().getBytes();
+
+			managedMemoryFractionOnHeap = groupOnHeapManagedMemoryBytes > 0
+				? (double) operatorResourceSpec.getOnHeapManagedMemory().getBytes() / groupOnHeapManagedMemoryBytes
+				: 0.0;
+
+			managedMemoryFractionOffHeap = groupOffHeapManagedMemoryBytes > 0
+				? (double) operatorResourceSpec.getOffHeapManagedMemory().getBytes() / groupOffHeapManagedMemoryBytes
+				: 0.0;
+		}
+
+		operatorConfig.setManagedMemoryFractionOnHeap(managedMemoryFractionOnHeap);
+		operatorConfig.setManagedMemoryFractionOffHeap(managedMemoryFractionOffHeap);
 	}
 
 	private void configureCheckpointing() {

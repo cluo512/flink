@@ -23,8 +23,6 @@ import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
-import org.apache.flink.configuration.JobManagerOptions;
-import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.util.NetUtils;
 
@@ -53,7 +51,6 @@ import java.util.Map;
 
 import scala.Some;
 import scala.Tuple2;
-import scala.concurrent.duration.FiniteDuration;
 
 import static org.apache.flink.configuration.ConfigOptions.key;
 
@@ -269,40 +266,6 @@ public class BootstrapTools {
 	}
 
 	/**
-	 * Generate a task manager configuration.
-	 * @param baseConfig Config to start from.
-	 * @param jobManagerHostname Job manager host name.
-	 * @param jobManagerPort Port of the job manager.
-	 * @param numSlots Number of slots to configure.
-	 * @param registrationTimeout Timeout for registration
-	 * @return TaskManager configuration
-	 */
-	public static Configuration generateTaskManagerConfiguration(
-				Configuration baseConfig,
-				String jobManagerHostname,
-				int jobManagerPort,
-				int numSlots,
-				FiniteDuration registrationTimeout) {
-
-		Configuration cfg = cloneConfiguration(baseConfig);
-
-		if (jobManagerHostname != null && !jobManagerHostname.isEmpty()) {
-			cfg.setString(JobManagerOptions.ADDRESS, jobManagerHostname);
-		}
-
-		if (jobManagerPort > 0) {
-			cfg.setInteger(JobManagerOptions.PORT, jobManagerPort);
-		}
-
-		cfg.setString(TaskManagerOptions.REGISTRATION_TIMEOUT, registrationTimeout.toString());
-		if (numSlots != -1){
-			cfg.setInteger(TaskManagerOptions.NUM_TASK_SLOTS, numSlots);
-		}
-
-		return cfg;
-	}
-
-	/**
 	 * Writes a Flink YAML config file from a Flink Configuration object.
 	 * @param cfg The Flink config
 	 * @param file The File to write to
@@ -418,7 +381,8 @@ public class BootstrapTools {
 			boolean hasLogback,
 			boolean hasLog4j,
 			boolean hasKrb5,
-			Class<?> mainClass) {
+			Class<?> mainClass,
+			String mainArgs) {
 
 		final Map<String, String> startCommandValues = new HashMap<>();
 		startCommandValues.put("java", "$JAVA_HOME/bin/java");
@@ -464,7 +428,11 @@ public class BootstrapTools {
 		startCommandValues.put("redirects",
 			"1> " + logDirectory + "/taskmanager.out " +
 			"2> " + logDirectory + "/taskmanager.err");
-		startCommandValues.put("args", "--configDir " + configDirectory);
+		String args = "--configDir " + configDirectory;
+		if (!mainArgs.isEmpty()) {
+			args += " " + mainArgs;
+		}
+		startCommandValues.put("args",  args);
 
 		final String commandTemplate = flinkConfig
 			.getString(ConfigConstants.YARN_CONTAINER_START_COMMAND_TEMPLATE,

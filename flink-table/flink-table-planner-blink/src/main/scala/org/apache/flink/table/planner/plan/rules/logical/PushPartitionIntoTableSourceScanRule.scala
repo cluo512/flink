@@ -18,8 +18,9 @@
 
 package org.apache.flink.table.planner.plan.rules.logical
 
+import org.apache.flink.table.api.TableException
 import org.apache.flink.table.planner.calcite.{FlinkContext, FlinkTypeFactory}
-import org.apache.flink.table.planner.plan.schema.{FlinkRelOptTable, TableSourceTable}
+import org.apache.flink.table.planner.plan.schema.{FlinkPreparingTableBase, TableSourceTable}
 import org.apache.flink.table.planner.plan.stats.FlinkStatistic
 import org.apache.flink.table.planner.plan.utils.{FlinkRelOptUtil, PartitionPruner, RexNodeExtractor}
 import org.apache.flink.table.sources.PartitionableTableSource
@@ -50,10 +51,8 @@ class PushPartitionIntoTableSourceScanRule extends RelOptRule(
     val scan: LogicalTableScan = call.rel(1)
     scan.getTable.unwrap(classOf[TableSourceTable[_]]) match {
       case table: TableSourceTable[_] =>
-        table.tableSource match {
-          case p: PartitionableTableSource => p.getPartitionFieldNames.nonEmpty
-          case _ => false
-        }
+        table.catalogTable.isPartitioned &&
+          table.tableSource.isInstanceOf[PartitionableTableSource]
       case _ => false
     }
   }
@@ -61,19 +60,11 @@ class PushPartitionIntoTableSourceScanRule extends RelOptRule(
   override def onMatch(call: RelOptRuleCall): Unit = {
     val filter: Filter = call.rel(0)
     val scan: LogicalTableScan = call.rel(1)
-    val table: FlinkRelOptTable = scan.getTable.asInstanceOf[FlinkRelOptTable]
-    pushPartitionIntoScan(call, filter, scan, table)
-  }
+    val tableSourceTable: TableSourceTable[_] = scan.getTable.unwrap(classOf[TableSourceTable[_]])
 
-  private def pushPartitionIntoScan(
-      call: RelOptRuleCall,
-      filter: Filter,
-      scan: LogicalTableScan,
-      relOptTable: FlinkRelOptTable): Unit = {
+    val partitionFieldNames = tableSourceTable.catalogTable.getPartitionKeys.toSeq.toArray[String]
 
-    val tableSourceTable = relOptTable.unwrap(classOf[TableSourceTable[_]])
     val tableSource = tableSourceTable.tableSource.asInstanceOf[PartitionableTableSource]
-    val partitionFieldNames = tableSource.getPartitionFieldNames.toList.toArray
     val inputFieldType = filter.getInput.getRowType
 
     val relBuilder = call.builder()
@@ -114,7 +105,13 @@ class PushPartitionIntoTableSourceScanRule extends RelOptRule(
 
     val newTableSource = tableSource.applyPartitionPruning(remainingPartitions)
 
-    val statistic = tableSourceTable.statistic
+    if (newTableSource.explainSource().equals(tableSourceTable.tableSource.explainSource())) {
+      throw new TableException("Failed to push partition into table source! "
+        + "table source with pushdown capability must override and change "
+        + "explainSource() API to explain the pushdown applied!")
+    }
+
+    val statistic = tableSourceTable.getStatistic
     val newStatistic = if (remainingPartitions.size() == allPartitions.size()) {
       // Keep all Statistics if no predicates can be pushed down
       statistic
@@ -124,11 +121,9 @@ class PushPartitionIntoTableSourceScanRule extends RelOptRule(
       // Remove tableStats after predicates pushed down
       FlinkStatistic.builder().statistic(statistic).tableStats(null).build()
     }
-    val newTableSourceTable = new TableSourceTable(
-      newTableSource, tableSourceTable.isStreamingMode, newStatistic)
-   val newRelOptTable = relOptTable.copy(newTableSourceTable, relOptTable.getRowType)
+    val newTableSourceTable = tableSourceTable.copy(newTableSource, newStatistic)
 
-    val newScan = new LogicalTableScan(scan.getCluster, scan.getTraitSet, newRelOptTable)
+    val newScan = new LogicalTableScan(scan.getCluster, scan.getTraitSet, newTableSourceTable)
     // check whether framework still need to do a filter
     if (nonPartitionPredicate.isAlwaysTrue) {
       call.transformTo(newScan)

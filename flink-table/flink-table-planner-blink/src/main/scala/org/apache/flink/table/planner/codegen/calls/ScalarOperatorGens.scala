@@ -390,6 +390,16 @@ object ScalarOperatorGens {
     }
   }
 
+  def generateIsNotDistinctFrom(
+      ctx: CodeGeneratorContext,
+      left: GeneratedExpression,
+      right: GeneratedExpression)
+    : GeneratedExpression = {
+    generateOr(ctx,
+      generateAnd(ctx, generateIsNull(ctx, left), generateIsNull(ctx, right)),
+      generateEquals(ctx, left, right))
+  }
+
   def generateNotEquals(
       ctx: CodeGeneratorContext,
       left: GeneratedExpression,
@@ -838,7 +848,7 @@ object ScalarOperatorGens {
     case (ROW, VARCHAR | CHAR) =>
       generateCastBaseRowToString(ctx, operand, operand.resultType.asInstanceOf[RowType])
 
-    case (ANY, VARCHAR | CHAR) =>
+    case (RAW, VARCHAR | CHAR) =>
       generateStringResultCallIfArgsNotNull(ctx, Seq(operand)) {
         terms =>
           val converter = DataFormatConverters.getConverterForDataType(
@@ -923,7 +933,7 @@ object ScalarOperatorGens {
         resultNullable = true) {
         operandTerm =>
           s"""
-             |${qualifyMethod(BuiltInMethods.STRING_TO_TIMESTAMP)}($operandTerm.toString())
+             |${qualifyMethod(BuiltInMethod.STRING_TO_TIMESTAMP.method)}($operandTerm.toString())
            """.stripMargin
       }
 
@@ -2159,7 +2169,7 @@ object ScalarOperatorGens {
         s"${qualifyMethod(BuiltInMethods.STRING_TO_TIME)}($operandTerm.toString())"
       case TIMESTAMP_WITHOUT_TIME_ZONE =>
         s"""
-           |${qualifyMethod(BuiltInMethods.STRING_TO_TIMESTAMP)}($operandTerm.toString())
+           |${qualifyMethod(BuiltInMethod.STRING_TO_TIMESTAMP.method)}($operandTerm.toString())
            |""".stripMargin
       case _ => throw new UnsupportedOperationException
     }
@@ -2174,7 +2184,7 @@ object ScalarOperatorGens {
       case TIME_WITHOUT_TIME_ZONE =>
         s"${qualifyMethod(BuiltInMethods.UNIX_TIME_TO_STRING)}($operandTerm)"
       case TIMESTAMP_WITHOUT_TIME_ZONE => // including rowtime indicator
-        s"${qualifyMethod(BuiltInMethods.TIMESTAMP_TO_STRING)}($operandTerm, 3)"
+        s"${qualifyMethod(BuiltInMethod.UNIX_TIMESTAMP_TO_STRING.method)}($operandTerm, 3)"
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE =>
         val method = qualifyMethod(BuiltInMethods.TIMESTAMP_TO_STRING_TIME_ZONE)
         val zone = ctx.addReusableTimeZone()

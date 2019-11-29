@@ -91,6 +91,11 @@ public interface TypeGetterSetters {
 	Decimal getDecimal(int ordinal, int precision, int scale);
 
 	/**
+	 * Get Timestamp value, internal format is SqlTimestamp.
+	 */
+	SqlTimestamp getTimestamp(int ordinal, int precision);
+
+	/**
 	 * Get generic value, internal format is BinaryGeneric.
 	 */
 	<T> BinaryGeneric<T> getGeneric(int ordinal);
@@ -160,6 +165,16 @@ public interface TypeGetterSetters {
 	 */
 	void setDecimal(int i, Decimal value, int precision);
 
+	/**
+	 * Set Timestamp value.
+	 *
+	 * <p>Note:
+	 * If precision is compact: can call setNullAt when SqlTimestamp value is null.
+	 * Otherwise: can not call setNullAt when SqlTimestamp value is null, must call
+	 * setTimestamp(ordinal, null, precision) because we need to update var-length-part.
+	 */
+	void setTimestamp(int ordinal, SqlTimestamp value, int precision);
+
 	static Object get(TypeGetterSetters row, int ordinal, LogicalType type) {
 		switch (type.getTypeRoot()) {
 			case BOOLEAN:
@@ -198,7 +213,7 @@ public interface TypeGetterSetters {
 			case BINARY:
 			case VARBINARY:
 				return row.getBinary(ordinal);
-			case ANY:
+			case RAW:
 				return row.getGeneric(ordinal);
 			default:
 				throw new RuntimeException("Not support type: " + type);

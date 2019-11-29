@@ -67,9 +67,11 @@ import java.io.Serializable;
  * {@link StreamingFileSink#forBulkFormat(Path, BulkWriter.Factory)}.
  *
  *
- * <p>The filenames of the part files contain the part prefix, "part-", the parallel subtask index of the sink
- * and a rolling counter. For example the file {@code "part-1-17"} contains the data from
- * {@code subtask 1} of the sink and is the {@code 17th} bucket created by that subtask.
+ * <p>The filenames of the part files could be defined using {@link OutputFileConfig}, this configuration contain
+ * a part prefix and part suffix, that will be used with the parallel subtask index of the sink
+ * and a rolling counter. For example for a prefix "prefix" and a suffix ".ext" the file create will have a name
+ * {@code "prefix-1-17.ext"} containing the data from {@code subtask 1} of the sink and is the {@code 17th} bucket
+ * created by that subtask.
  * Part files roll based on the user-specified {@link RollingPolicy}. By default, a {@link DefaultRollingPolicy}
  * is used.
  *
@@ -110,7 +112,7 @@ public class StreamingFileSink<IN>
 
 	private final long bucketCheckInterval;
 
-	private final StreamingFileSink.BucketsBuilder<IN, ?> bucketsBuilder;
+	private final StreamingFileSink.BucketsBuilder<IN, ?, ? extends BucketsBuilder<IN, ?, ?>> bucketsBuilder;
 
 	// --------------------------- runtime fields -----------------------------
 
@@ -125,11 +127,24 @@ public class StreamingFileSink<IN>
 	private transient ListState<Long> maxPartCountersState;
 
 	/**
-	 * Creates a new {@code StreamingFileSink} that writes files to the given base directory.
+	 * Creates a new {@code StreamingFileSink} that writes files in row-based format to the given base directory.
 	 */
 	protected StreamingFileSink(
-			final StreamingFileSink.BucketsBuilder<IN, ?> bucketsBuilder,
-			final long bucketCheckInterval) {
+		final RowFormatBuilder<IN, ?, ? extends BucketsBuilder<IN, ?, ?>> bucketsBuilder,
+		final long bucketCheckInterval) {
+
+		Preconditions.checkArgument(bucketCheckInterval > 0L);
+
+		this.bucketsBuilder = Preconditions.checkNotNull(bucketsBuilder);
+		this.bucketCheckInterval = bucketCheckInterval;
+	}
+
+	/**
+	 * Creates a new {@code StreamingFileSink} that writes files in bulk-encoded format to the given base directory.
+	 */
+	protected StreamingFileSink(
+		final BulkFormatBuilder<IN, ?, ? extends BucketsBuilder<IN, ?, ?>> bucketsBuilder,
+		final long bucketCheckInterval) {
 
 		Preconditions.checkArgument(bucketCheckInterval > 0L);
 
@@ -149,7 +164,7 @@ public class StreamingFileSink<IN>
 	 * @return The builder where the remaining of the configuration parameters for the sink can be configured.
 	 * In order to instantiate the sink, call {@link RowFormatBuilder#build()} after specifying the desired parameters.
 	 */
-	public static <IN> StreamingFileSink.RowFormatBuilder<IN, String> forRowFormat(
+	public static <IN> StreamingFileSink.RowFormatBuilder<IN, String, ? extends RowFormatBuilder<IN, String, ?>> forRowFormat(
 			final Path basePath, final Encoder<IN> encoder) {
 		return new StreamingFileSink.RowFormatBuilder<>(basePath, encoder, new DateTimeBucketAssigner<>());
 	}
@@ -162,7 +177,7 @@ public class StreamingFileSink<IN>
 	 * @return The builder where the remaining of the configuration parameters for the sink can be configured.
 	 * In order to instantiate the sink, call {@link RowFormatBuilder#build()} after specifying the desired parameters.
 	 */
-	public static <IN> StreamingFileSink.BulkFormatBuilder<IN, String> forBulkFormat(
+	public static <IN> StreamingFileSink.BulkFormatBuilder<IN, String, ? extends BulkFormatBuilder<IN, String, ?>> forBulkFormat(
 			final Path basePath, final BulkWriter.Factory<IN> writerFactory) {
 		return new StreamingFileSink.BulkFormatBuilder<>(basePath, writerFactory, new DateTimeBucketAssigner<>());
 	}
@@ -170,9 +185,16 @@ public class StreamingFileSink<IN>
 	/**
 	 * The base abstract class for the {@link RowFormatBuilder} and {@link BulkFormatBuilder}.
 	 */
-	protected abstract static class BucketsBuilder<IN, BucketID> implements Serializable {
+	private abstract static class BucketsBuilder<IN, BucketID, T extends BucketsBuilder<IN, BucketID, T>> implements Serializable {
 
 		private static final long serialVersionUID = 1L;
+
+		protected static final long DEFAULT_BUCKET_CHECK_INTERVAL = 60L * 1000L;
+
+		@SuppressWarnings("unchecked")
+		protected T self() {
+			return (T) this;
+		}
 
 		abstract Buckets<IN, BucketID> createBuckets(final int subtaskIndex) throws IOException;
 	}
@@ -181,76 +203,83 @@ public class StreamingFileSink<IN>
 	 * A builder for configuring the sink for row-wise encoding formats.
 	 */
 	@PublicEvolving
-	public static class RowFormatBuilder<IN, BucketID> extends StreamingFileSink.BucketsBuilder<IN, BucketID> {
+	public static class RowFormatBuilder<IN, BucketID, T extends RowFormatBuilder<IN, BucketID, T>> extends StreamingFileSink.BucketsBuilder<IN, BucketID, T> {
 
 		private static final long serialVersionUID = 1L;
 
-		private final long bucketCheckInterval;
+		private long bucketCheckInterval;
 
 		private final Path basePath;
 
-		private final Encoder<IN> encoder;
+		private Encoder<IN> encoder;
 
-		private final BucketAssigner<IN, BucketID> bucketAssigner;
+		private BucketAssigner<IN, BucketID> bucketAssigner;
 
-		private final RollingPolicy<IN, BucketID> rollingPolicy;
+		private RollingPolicy<IN, BucketID> rollingPolicy;
 
-		private final BucketFactory<IN, BucketID> bucketFactory;
+		private BucketFactory<IN, BucketID> bucketFactory;
 
-		private final String partFilePrefix;
+		private OutputFileConfig outputFileConfig;
 
-		private final String partFileSuffix;
-
-		RowFormatBuilder(Path basePath, Encoder<IN> encoder, BucketAssigner<IN, BucketID> bucketAssigner) {
-			this(basePath, encoder, bucketAssigner, DefaultRollingPolicy.create().build(), 60L * 1000L, new DefaultBucketFactoryImpl<>(), PartFileConfig.DEFAULT_PART_PREFIX, PartFileConfig.DEFAULT_PART_SUFFIX);
+		protected RowFormatBuilder(Path basePath, Encoder<IN> encoder, BucketAssigner<IN, BucketID> bucketAssigner) {
+			this(basePath, encoder, bucketAssigner, DefaultRollingPolicy.builder().build(), DEFAULT_BUCKET_CHECK_INTERVAL, new DefaultBucketFactoryImpl<>(), OutputFileConfig.builder().build());
 		}
 
-		private RowFormatBuilder(
+		protected RowFormatBuilder(
 				Path basePath,
 				Encoder<IN> encoder,
 				BucketAssigner<IN, BucketID> assigner,
 				RollingPolicy<IN, BucketID> policy,
 				long bucketCheckInterval,
 				BucketFactory<IN, BucketID> bucketFactory,
-				String partFilePrefix,
-				String partFileSuffix) {
+				OutputFileConfig outputFileConfig) {
 			this.basePath = Preconditions.checkNotNull(basePath);
 			this.encoder = Preconditions.checkNotNull(encoder);
 			this.bucketAssigner = Preconditions.checkNotNull(assigner);
 			this.rollingPolicy = Preconditions.checkNotNull(policy);
 			this.bucketCheckInterval = bucketCheckInterval;
 			this.bucketFactory = Preconditions.checkNotNull(bucketFactory);
-			this.partFilePrefix = Preconditions.checkNotNull(partFilePrefix);
-			this.partFileSuffix = Preconditions.checkNotNull(partFileSuffix);
+			this.outputFileConfig = Preconditions.checkNotNull(outputFileConfig);
 		}
 
-		public StreamingFileSink.RowFormatBuilder<IN, BucketID> withBucketCheckInterval(final long interval) {
-			return new RowFormatBuilder<>(basePath, encoder, bucketAssigner, rollingPolicy, interval, bucketFactory, partFilePrefix, partFileSuffix);
+		public long getBucketCheckInterval() {
+			return bucketCheckInterval;
 		}
 
-		public StreamingFileSink.RowFormatBuilder<IN, BucketID> withBucketAssigner(final BucketAssigner<IN, BucketID> assigner) {
-			return new RowFormatBuilder<>(basePath, encoder, Preconditions.checkNotNull(assigner), rollingPolicy, bucketCheckInterval, bucketFactory, partFilePrefix, partFileSuffix);
+		public T withBucketCheckInterval(final long interval) {
+			this.bucketCheckInterval = interval;
+			return self();
 		}
 
-		public StreamingFileSink.RowFormatBuilder<IN, BucketID> withRollingPolicy(final RollingPolicy<IN, BucketID> policy) {
-			return new RowFormatBuilder<>(basePath, encoder, bucketAssigner, Preconditions.checkNotNull(policy), bucketCheckInterval, bucketFactory, partFilePrefix, partFileSuffix);
+		public T withBucketAssigner(final BucketAssigner<IN, BucketID> assigner) {
+			this.bucketAssigner = Preconditions.checkNotNull(assigner);
+			return self();
 		}
 
-		public <ID> StreamingFileSink.RowFormatBuilder<IN, ID> withBucketAssignerAndPolicy(final BucketAssigner<IN, ID> assigner, final RollingPolicy<IN, ID> policy) {
-			return new RowFormatBuilder<>(basePath, encoder, Preconditions.checkNotNull(assigner), Preconditions.checkNotNull(policy), bucketCheckInterval, new DefaultBucketFactoryImpl<>(), partFilePrefix, partFileSuffix);
+		public T withRollingPolicy(final RollingPolicy<IN, BucketID> policy) {
+			this.rollingPolicy = Preconditions.checkNotNull(policy);
+			return self();
 		}
 
-		public StreamingFileSink.RowFormatBuilder<IN, BucketID> withPartFilePrefix(final String partPrefix) {
-			return new RowFormatBuilder<>(basePath, encoder, bucketAssigner, rollingPolicy, bucketCheckInterval, bucketFactory, partPrefix, partFileSuffix);
+		public T withOutputFileConfig(final OutputFileConfig outputFileConfig) {
+			this.outputFileConfig = outputFileConfig;
+			return self();
 		}
 
-		public StreamingFileSink.RowFormatBuilder<IN, BucketID> withPartFileSuffix(final String partSuffix) {
-			return new RowFormatBuilder<>(basePath, encoder, bucketAssigner, rollingPolicy, bucketCheckInterval, bucketFactory, partFilePrefix, partSuffix);
+		public <ID> StreamingFileSink.RowFormatBuilder<IN, ID, ? extends RowFormatBuilder<IN, ID, ?>> withNewBucketAssignerAndPolicy(final BucketAssigner<IN, ID> assigner, final RollingPolicy<IN, ID> policy) {
+			Preconditions.checkState(bucketFactory.getClass() == DefaultBucketFactoryImpl.class, "newBuilderWithBucketAssignerAndPolicy() cannot be called after specifying a customized bucket factory");
+			return new RowFormatBuilder<>(basePath, encoder, Preconditions.checkNotNull(assigner), Preconditions.checkNotNull(policy), bucketCheckInterval, new DefaultBucketFactoryImpl<>(), outputFileConfig);
 		}
 
 		/** Creates the actual sink. */
 		public StreamingFileSink<IN> build() {
 			return new StreamingFileSink<>(this, bucketCheckInterval);
+		}
+
+		@VisibleForTesting
+		T withBucketFactory(final BucketFactory<IN, BucketID> factory) {
+			this.bucketFactory = Preconditions.checkNotNull(factory);
+			return self();
 		}
 
 		@Override
@@ -262,12 +291,7 @@ public class StreamingFileSink<IN>
 					new RowWisePartWriter.Factory<>(encoder),
 					rollingPolicy,
 					subtaskIndex,
-					new PartFileConfig(partFilePrefix, partFileSuffix));
-		}
-
-		@VisibleForTesting
-		StreamingFileSink.RowFormatBuilder<IN, BucketID> withBucketFactory(final BucketFactory<IN, BucketID> factory) {
-			return new RowFormatBuilder<>(basePath, encoder, bucketAssigner, rollingPolicy, bucketCheckInterval, Preconditions.checkNotNull(factory), partFilePrefix, partFileSuffix);
+					outputFileConfig);
 		}
 	}
 
@@ -275,64 +299,69 @@ public class StreamingFileSink<IN>
 	 * A builder for configuring the sink for bulk-encoding formats, e.g. Parquet/ORC.
 	 */
 	@PublicEvolving
-	public static class BulkFormatBuilder<IN, BucketID> extends StreamingFileSink.BucketsBuilder<IN, BucketID> {
+	public static class BulkFormatBuilder<IN, BucketID, T extends BulkFormatBuilder<IN, BucketID, T>> extends StreamingFileSink.BucketsBuilder<IN, BucketID, T> {
 
 		private static final long serialVersionUID = 1L;
 
-		private final long bucketCheckInterval;
+		private long bucketCheckInterval;
 
 		private final Path basePath;
 
-		private final BulkWriter.Factory<IN> writerFactory;
+		private BulkWriter.Factory<IN> writerFactory;
 
-		private final BucketAssigner<IN, BucketID> bucketAssigner;
+		private BucketAssigner<IN, BucketID> bucketAssigner;
 
-		private final BucketFactory<IN, BucketID> bucketFactory;
+		private BucketFactory<IN, BucketID> bucketFactory;
 
-		private final String partFilePrefix;
+		private OutputFileConfig outputFileConfig;
 
-		private final String partFileSuffix;
-
-		BulkFormatBuilder(Path basePath, BulkWriter.Factory<IN> writerFactory, BucketAssigner<IN, BucketID> assigner) {
-			this(basePath, writerFactory, assigner, 60L * 1000L, new DefaultBucketFactoryImpl<>(), PartFileConfig.DEFAULT_PART_PREFIX, PartFileConfig.DEFAULT_PART_SUFFIX);
+		protected BulkFormatBuilder(Path basePath, BulkWriter.Factory<IN> writerFactory, BucketAssigner<IN, BucketID> assigner) {
+			this(basePath, writerFactory, assigner, DEFAULT_BUCKET_CHECK_INTERVAL, new DefaultBucketFactoryImpl<>(), OutputFileConfig.builder().build());
 		}
 
-		private BulkFormatBuilder(
+		protected BulkFormatBuilder(
 				Path basePath,
 				BulkWriter.Factory<IN> writerFactory,
 				BucketAssigner<IN, BucketID> assigner,
 				long bucketCheckInterval,
 				BucketFactory<IN, BucketID> bucketFactory,
-				String partFilePrefix,
-				String partFileSuffix) {
+				OutputFileConfig outputFileConfig) {
 			this.basePath = Preconditions.checkNotNull(basePath);
 			this.writerFactory = writerFactory;
 			this.bucketAssigner = Preconditions.checkNotNull(assigner);
 			this.bucketCheckInterval = bucketCheckInterval;
 			this.bucketFactory = Preconditions.checkNotNull(bucketFactory);
-			this.partFilePrefix = Preconditions.checkNotNull(partFilePrefix);
-			this.partFileSuffix = Preconditions.checkNotNull(partFileSuffix);
+			this.outputFileConfig = Preconditions.checkNotNull(outputFileConfig);
 		}
 
-		public StreamingFileSink.BulkFormatBuilder<IN, BucketID> withBucketCheckInterval(long interval) {
-			return new BulkFormatBuilder<>(basePath, writerFactory, bucketAssigner, interval, bucketFactory, partFilePrefix, partFileSuffix);
+		public long getBucketCheckInterval() {
+			return bucketCheckInterval;
 		}
 
-		public <ID> StreamingFileSink.BulkFormatBuilder<IN, ID> withBucketAssigner(BucketAssigner<IN, ID> assigner) {
-			return new BulkFormatBuilder<>(basePath, writerFactory, Preconditions.checkNotNull(assigner), bucketCheckInterval, new DefaultBucketFactoryImpl<>(), partFilePrefix, partFileSuffix);
+		public T withBucketCheckInterval(long interval) {
+			this.bucketCheckInterval = interval;
+			return self();
+		}
+
+		public T withBucketAssigner(BucketAssigner<IN, BucketID> assigner) {
+			this.bucketAssigner = Preconditions.checkNotNull(assigner);
+			return self();
 		}
 
 		@VisibleForTesting
-		StreamingFileSink.BulkFormatBuilder<IN, BucketID> withBucketFactory(final BucketFactory<IN, BucketID> factory) {
-			return new BulkFormatBuilder<>(basePath, writerFactory, bucketAssigner, bucketCheckInterval, Preconditions.checkNotNull(factory), partFilePrefix, partFileSuffix);
-	}
-
-		public StreamingFileSink.BulkFormatBuilder<IN, BucketID> withPartFilePrefix(final String partPrefix) {
-			return new BulkFormatBuilder<>(basePath, writerFactory, bucketAssigner, bucketCheckInterval, bucketFactory, partPrefix, partFileSuffix);
+		T withBucketFactory(final BucketFactory<IN, BucketID> factory) {
+			this.bucketFactory = Preconditions.checkNotNull(factory);
+			return self();
 		}
 
-		public StreamingFileSink.BulkFormatBuilder<IN, BucketID> withPartFileSuffix(final String partSuffix) {
-			return new BulkFormatBuilder<>(basePath, writerFactory, bucketAssigner, bucketCheckInterval, bucketFactory, partFilePrefix, partSuffix);
+		public T withOutputFileConfig(final OutputFileConfig outputFileConfig) {
+			this.outputFileConfig = outputFileConfig;
+			return self();
+		}
+
+		public <ID> StreamingFileSink.BulkFormatBuilder<IN, ID, ? extends BulkFormatBuilder<IN, ID, ?>> withNewBucketAssigner(final BucketAssigner<IN, ID> assigner) {
+			Preconditions.checkState(bucketFactory.getClass() == DefaultBucketFactoryImpl.class, "newBuilderWithBucketAssigner() cannot be called after specifying a customized bucket factory");
+			return new BulkFormatBuilder<>(basePath, writerFactory, Preconditions.checkNotNull(assigner), bucketCheckInterval, new DefaultBucketFactoryImpl<>(), outputFileConfig);
 		}
 
 		/** Creates the actual sink. */
@@ -349,7 +378,7 @@ public class StreamingFileSink<IN>
 					new BulkPartWriter.Factory<>(writerFactory),
 					OnCheckpointRollingPolicy.build(),
 					subtaskIndex,
-					new PartFileConfig(partFilePrefix, partFileSuffix));
+					outputFileConfig);
 		}
 	}
 

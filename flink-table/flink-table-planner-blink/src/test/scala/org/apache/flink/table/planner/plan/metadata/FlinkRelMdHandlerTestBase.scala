@@ -22,7 +22,7 @@ import org.apache.flink.table.api.{TableConfig, TableException}
 import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog, GenericInMemoryCatalog}
 import org.apache.flink.table.expressions._
 import org.apache.flink.table.expressions.utils.ApiExpressionUtils.intervalOfMillis
-import org.apache.flink.table.functions.UserFunctionsTypeHelper
+import org.apache.flink.table.functions.{FunctionIdentifier, UserFunctionsTypeHelper}
 import org.apache.flink.table.planner.calcite.FlinkRelBuilder.PlannerNamedWindowProperty
 import org.apache.flink.table.planner.calcite.{FlinkRelBuilder, FlinkTypeFactory}
 import org.apache.flink.table.planner.delegation.PlannerContext
@@ -39,7 +39,7 @@ import org.apache.flink.table.planner.plan.nodes.calcite.{LogicalExpand, Logical
 import org.apache.flink.table.planner.plan.nodes.logical._
 import org.apache.flink.table.planner.plan.nodes.physical.batch._
 import org.apache.flink.table.planner.plan.nodes.physical.stream._
-import org.apache.flink.table.planner.plan.schema.FlinkRelOptTable
+import org.apache.flink.table.planner.plan.schema.FlinkPreparingTableBase
 import org.apache.flink.table.planner.plan.stream.sql.join.TestTemporalTable
 import org.apache.flink.table.planner.plan.utils.AggregateUtil.transformToStreamAggregateInfoList
 import org.apache.flink.table.planner.plan.utils._
@@ -48,6 +48,7 @@ import org.apache.flink.table.runtime.operators.rank.{ConstantRankRange, RankTyp
 import org.apache.flink.table.types.AtomicDataType
 import org.apache.flink.table.types.logical.{BigIntType, DoubleType, IntType, LogicalType, TimestampKind, TimestampType, VarCharType}
 import org.apache.flink.table.types.utils.TypeConversions
+
 import com.google.common.collect.{ImmutableList, Lists}
 import org.apache.calcite.jdbc.CalciteSchema
 import org.apache.calcite.plan._
@@ -70,6 +71,7 @@ import org.junit.{Before, BeforeClass}
 
 import java.math.BigDecimal
 import java.util
+import org.apache.flink.table.module.ModuleManager
 
 import scala.collection.JavaConversions._
 
@@ -82,13 +84,15 @@ class FlinkRelMdHandlerTestBase {
   val builtinDatabase = "default_database"
   val catalogManager = new CatalogManager(
     builtinCatalog, new GenericInMemoryCatalog(builtinCatalog, builtinDatabase))
+  val moduleManager = new ModuleManager
 
   // TODO batch RelNode and stream RelNode should have different PlannerContext
   //  and RelOptCluster due to they have different trait definitions.
   val plannerContext: PlannerContext =
     new PlannerContext(
       tableConfig,
-      new FunctionCatalog(catalogManager),
+      new FunctionCatalog(catalogManager, moduleManager),
+      catalogManager,
       CalciteSchema.from(rootSchema),
       util.Arrays.asList(
         ConventionTraitDef.INSTANCE,
@@ -721,7 +725,14 @@ class FlinkRelMdHandlerTestBase {
     val relDataType = builder.build()
 
     AggregateCall.create(
-      AggSqlFunction("top3", "top3", new Top3, resultDataType, accDataType, typeFactory, false),
+      AggSqlFunction(
+        FunctionIdentifier.of("top3"),
+        "top3",
+        new Top3,
+        resultDataType,
+        accDataType,
+        typeFactory,
+        false),
       false,
       false,
       false,
@@ -2344,8 +2355,11 @@ class FlinkRelMdHandlerTestBase {
 
   protected def createDataStreamScan[T](
       tableNames: util.List[String], traitSet: RelTraitSet): T = {
-    val table = relBuilder.getRelOptSchema.asInstanceOf[CalciteCatalogReader].getTable(tableNames)
-      .asInstanceOf[FlinkRelOptTable]
+    val table = relBuilder
+      .getRelOptSchema
+      .asInstanceOf[CalciteCatalogReader]
+      .getTable(tableNames)
+      .asInstanceOf[FlinkPreparingTableBase]
     val conventionTrait = traitSet.getTrait(ConventionTraitDef.INSTANCE)
     val scan = conventionTrait match {
       case Convention.NONE =>

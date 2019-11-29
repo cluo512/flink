@@ -77,7 +77,7 @@ public class SqlDateTimeUtils {
 	 * <p>This is the modulo 'mask' used when converting
 	 * TIMESTAMP values to DATE and TIME values.
 	 */
-	private static final long MILLIS_PER_DAY = 86400000; // = 24 * 60 * 60 * 1000
+	private static final long MILLIS_PER_DAY = 86400000L; // = 24 * 60 * 60 * 1000
 
 	/** The SimpleDateFormat string for ISO dates, "yyyy-MM-dd". */
 	private static final String DATE_FORMAT_STRING = "yyyy-MM-dd";
@@ -1295,6 +1295,12 @@ public class SqlDateTimeUtils {
 			multiplier /= 10;
 		}
 		return r;
+	}
+
+	// TODO: remove if CALCITE-3199 fixed
+	//  https://issues.apache.org/jira/browse/CALCITE-3199
+	public static long unixDateCeil(TimeUnitRange range, long date) {
+		return julianDateFloor(range, (int) date + EPOCH_JULIAN, false);
 	}
 
 }

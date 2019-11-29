@@ -35,7 +35,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Optional;
 
 /**
  * Factory for {@link ResultPartition} to use in {@link NettyShuffleEnvironment}.
@@ -179,18 +178,29 @@ public class ResultPartitionFactory {
 		}
 	}
 
+	/**
+	 * The minimum pool size should be <code>numberOfSubpartitions + 1</code> for two considerations:
+	 *
+	 * <p>1. StreamTask can only process input if there is at-least one available buffer on output side, so it might cause
+	 * stuck problem if the minimum pool size is exactly equal to the number of subpartitions, because every subpartition
+	 * might maintain a partial unfilled buffer.
+	 *
+	 * <p>2. Increases one more buffer for every output LocalBufferPool to void performance regression if processing input is
+	 * based on at-least one buffer available on output side.
+	 */
 	@VisibleForTesting
 	FunctionWithException<BufferPoolOwner, BufferPool, IOException> createBufferPoolFactory(
 			int numberOfSubpartitions,
 			ResultPartitionType type) {
-		return p -> {
+		return bufferPoolOwner -> {
 			int maxNumberOfMemorySegments = type.isBounded() ?
 				numberOfSubpartitions * networkBuffersPerChannel + floatingNetworkBuffersPerGate : Integer.MAX_VALUE;
 			// If the partition type is back pressure-free, we register with the buffer pool for
 			// callbacks to release memory.
-			return bufferPoolFactory.createBufferPool(numberOfSubpartitions,
+			return bufferPoolFactory.createBufferPool(
+				numberOfSubpartitions + 1,
 				maxNumberOfMemorySegments,
-				type.hasBackPressure() ? Optional.empty() : Optional.of(p));
+				type.hasBackPressure() ? null : bufferPoolOwner);
 		};
 	}
 

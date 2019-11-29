@@ -43,6 +43,7 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.nodemanager.NodeManager;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
@@ -78,6 +79,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -88,6 +90,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+
+import static org.apache.flink.util.Preconditions.checkState;
+import static org.junit.Assert.assertEquals;
 
 /**
  * This base class allows to use the MiniYARNCluster.
@@ -125,6 +130,9 @@ public abstract class YarnTestBase extends TestLogger {
 		"Remote connection to [null] failed with java.net.ConnectException: Connection refused",
 		"Remote connection to [null] failed with java.nio.channels.NotYetConnectedException",
 		"java.io.IOException: Connection reset by peer",
+
+		// filter out expected ResourceManagerException caused by intended shutdown request
+		YarnResourceManager.ERROR_MASSAGE_ON_SHUTDOWN_REQUEST,
 
 		// this can happen in Akka 2.4 on shutdown.
 		"java.util.concurrent.RejectedExecutionException: Worker has already been shutdown",
@@ -296,12 +304,12 @@ public abstract class YarnTestBase extends TestLogger {
 
 	@Nonnull
 	YarnClusterDescriptor createYarnClusterDescriptor(org.apache.flink.configuration.Configuration flinkConfiguration) {
-		final YarnClusterDescriptor yarnClusterDescriptor = new YarnClusterDescriptor(
-			flinkConfiguration,
-			YARN_CONFIGURATION,
-			CliFrontend.getConfigurationDirectoryFromEnv(),
-			yarnClient,
-			true);
+		final YarnClusterDescriptor yarnClusterDescriptor = YarnTestUtils.createClusterDescriptorWithLogging(
+				tempConfPathForSecureRun.getAbsolutePath(),
+				flinkConfiguration,
+				YARN_CONFIGURATION,
+				yarnClient,
+				true);
 		yarnClusterDescriptor.setLocalJarPath(new Path(flinkUberjar.toURI()));
 		yarnClusterDescriptor.addShipFiles(Collections.singletonList(flinkLibFolder));
 		return yarnClusterDescriptor;
@@ -571,6 +579,15 @@ public abstract class YarnTestBase extends TestLogger {
 			count += containers.size();
 		}
 		return count;
+	}
+
+	protected ApplicationReport getOnlyApplicationReport() throws IOException, YarnException {
+		final YarnClient yarnClient = getYarnClient();
+		checkState(yarnClient != null);
+
+		final List<ApplicationReport> apps = yarnClient.getApplications(EnumSet.of(YarnApplicationState.RUNNING));
+		assertEquals(1, apps.size()); // Only one running
+		return apps.get(0);
 	}
 
 	public static void startYARNSecureMode(YarnConfiguration conf, String principal, String keytab) {
@@ -938,8 +955,11 @@ public abstract class YarnTestBase extends TestLogger {
 	@AfterClass
 	public static void teardown() throws Exception {
 
-		LOG.info("Stopping MiniYarn Cluster");
-		yarnCluster.stop();
+		if (yarnCluster != null) {
+			LOG.info("Stopping MiniYarn Cluster");
+			yarnCluster.stop();
+			yarnCluster = null;
+		}
 
 		// Unset FLINK_CONF_DIR, as it might change the behavior of other tests
 		Map<String, String> map = new HashMap<>(System.getenv());

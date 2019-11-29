@@ -22,7 +22,7 @@ import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.table.api.TableException
 import org.apache.flink.table.dataformat.DataFormatConverters.{DataFormatConverter, getConverterForDataType}
 import org.apache.flink.table.dataformat._
-import org.apache.flink.table.planner.calcite.{FlinkTypeFactory, RexAggLocalVariable, RexDistinctKeyVariable}
+import org.apache.flink.table.planner.calcite.{FlinkTypeFactory, RexDistinctKeyVariable, RexFieldVariable}
 import org.apache.flink.table.planner.codegen.CodeGenUtils.{requireTemporal, requireTimeInterval, _}
 import org.apache.flink.table.planner.codegen.GenerateUtils._
 import org.apache.flink.table.planner.codegen.GeneratedExpression.{NEVER_NULL, NO_CODE}
@@ -270,10 +270,10 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
     fieldExprs.zipWithIndex foreach {
       // timestamp type(Include TimeIndicator) and generic type can compatible with each other.
       case (fieldExpr, i)
-        if fieldExpr.resultType.isInstanceOf[TypeInformationAnyType[_]] ||
+        if fieldExpr.resultType.isInstanceOf[TypeInformationRawType[_]] ||
           fieldExpr.resultType.isInstanceOf[TimestampType] =>
         if (returnType.getTypeAt(i).getClass != fieldExpr.resultType.getClass
-          && !returnType.getTypeAt(i).isInstanceOf[TypeInformationAnyType[_]]) {
+          && !returnType.getTypeAt(i).isInstanceOf[TypeInformationRawType[_]]) {
           throw new CodeGenException(
             s"Incompatible types of expression and result type, Expression[$fieldExpr] type is " +
               s"[${fieldExpr.resultType}], result type is [${returnType.getTypeAt(i)}]")
@@ -396,10 +396,18 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
     GeneratedExpression(input1Term, NEVER_NULL, NO_CODE, input1Type)
   }
 
-  override def visitLocalRef(localRef: RexLocalRef): GeneratedExpression = localRef match {
-    case local: RexAggLocalVariable =>
-      GeneratedExpression(local.fieldTerm, local.nullTerm, NO_CODE, local.internalType)
-    case value: RexDistinctKeyVariable =>
+  override def visitLocalRef(localRef: RexLocalRef): GeneratedExpression =
+    throw new CodeGenException("RexLocalRef are not supported yet.")
+
+  def visitRexFieldVariable(variable: RexFieldVariable): GeneratedExpression = {
+      val internalType = FlinkTypeFactory.toLogicalType(variable.dataType)
+      val nullTerm = variable.fieldTerm + "IsNull" // not use newName, keep isNull unique.
+      ctx.addReusableMember(s"${primitiveTypeTermForType(internalType)} ${variable.fieldTerm};")
+      ctx.addReusableMember(s"boolean $nullTerm;")
+      GeneratedExpression(variable.fieldTerm, nullTerm, NO_CODE, internalType)
+  }
+
+  def visitDistinctKeyVariable(value: RexDistinctKeyVariable): GeneratedExpression = {
       val inputExpr = ctx.getReusableInputUnboxingExprs(input1Term, 0) match {
         case Some(expr) => expr
         case None =>
@@ -422,7 +430,6 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
       }
       // hide the generated code as it will be executed only once
       GeneratedExpression(inputExpr.resultTerm, inputExpr.nullTerm, NO_CODE, inputExpr.resultType)
-    case _ => throw new CodeGenException("Local variables are not supported yet.")
   }
 
   override def visitRangeRef(rangeRef: RexRangeRef): GeneratedExpression =
@@ -550,6 +557,11 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
         val left = operands.head
         val right = operands(1)
         generateEquals(ctx, left, right)
+
+      case IS_NOT_DISTINCT_FROM =>
+        val left = operands.head
+        val right = operands(1)
+        generateIsNotDistinctFrom(ctx, left, right)
 
       case NOT_EQUALS =>
         val left = operands.head

@@ -34,7 +34,7 @@ import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.`type`._
 import org.apache.calcite.sql.SqlIntervalQualifier
 import org.apache.calcite.sql.`type`.SqlTypeName._
-import org.apache.calcite.sql.`type`.{BasicSqlType, MapSqlType, SqlTypeName, SqlTypeUtil}
+import org.apache.calcite.sql.`type`.{BasicSqlType, MapSqlType, SqlTypeName}
 import org.apache.calcite.sql.parser.SqlParserPos
 import org.apache.calcite.util.ConversionUtil
 
@@ -116,9 +116,9 @@ class FlinkTypeFactory(typeSystem: RelDataTypeSystem) extends JavaTypeFactoryImp
         val multisetType = t.asInstanceOf[MultisetType]
         createMultisetType(createFieldTypeFromLogicalType(multisetType.getElementType), -1)
 
-      case LogicalTypeRoot.ANY =>
+      case LogicalTypeRoot.RAW =>
         new GenericRelDataType(
-          t.asInstanceOf[TypeInformationAnyType[_]],
+          t.asInstanceOf[TypeInformationRawType[_]],
           true,
           getTypeSystem)
 
@@ -314,9 +314,9 @@ class FlinkTypeFactory(typeSystem: RelDataTypeSystem) extends JavaTypeFactoryImp
     } else {
       // types are not all the same
       if (allTypes.exists(_.getSqlTypeName == SqlTypeName.ANY)) {
-        // one of the type was ANY.
+        // one of the type was RAW.
         // we cannot generate a common type if it differs from other types.
-        throw new TableException("Generic ANY types must have a common type information.")
+        throw new TableException("Generic RAW types must have a common type information.")
       } else {
         // cannot resolve a common type for different input types
         None
@@ -326,26 +326,6 @@ class FlinkTypeFactory(typeSystem: RelDataTypeSystem) extends JavaTypeFactoryImp
 
   override def getDefaultCharset: Charset = {
     Charset.forName(ConversionUtil.NATIVE_UTF16_CHARSET_NAME)
-  }
-
-  /**
-    * Calcite's default impl for division is apparently borrowed from T-SQL,
-    * but the details are a little different, e.g. when Decimal(34,0)/Decimal(10,0)
-    * To avoid confusion, follow the exact T-SQL behavior.
-    * Note that for (+-*), Calcite is also different from T-SQL;
-    * however, Calcite conforms to SQL2003 while T-SQL does not.
-    * therefore we keep Calcite's behavior on (+-*).
-    */
-  override def createDecimalQuotient(type1: RelDataType, type2: RelDataType): RelDataType = {
-    if (SqlTypeUtil.isExactNumeric(type1) && SqlTypeUtil.isExactNumeric(type2) &&
-        (SqlTypeUtil.isDecimal(type1) || SqlTypeUtil.isDecimal(type2))) {
-      val result = FlinkTypeSystem.inferDivisionType(
-        type1.getPrecision, type1.getScale,
-        type2.getPrecision, type2.getScale)
-      createSqlType(SqlTypeName.DECIMAL, result.getPrecision, result.getScale)
-    } else {
-      null
-    }
   }
 }
 
@@ -471,7 +451,7 @@ object FlinkTypeFactory {
 
       // symbol for special flags e.g. TRIM's BOTH, LEADING, TRAILING
       // are represented as Enum
-      case SYMBOL => new TypeInformationAnyType[Enum[_]](
+      case SYMBOL => new TypeInformationRawType[Enum[_]](
         TypeExtractor.createTypeInfo(classOf[Enum[_]]))
 
       // extract encapsulated Type
@@ -493,7 +473,7 @@ object FlinkTypeFactory {
           toLogicalType(mapRelDataType.getValueType))
 
       // CURSOR for UDTF case, whose type info will never be used, just a placeholder
-      case CURSOR => new TypeInformationAnyType[Nothing](new NothingTypeInfo)
+      case CURSOR => new TypeInformationRawType[Nothing](new NothingTypeInfo)
 
       case _@t =>
         throw new TableException(s"Type is not supported: $t")

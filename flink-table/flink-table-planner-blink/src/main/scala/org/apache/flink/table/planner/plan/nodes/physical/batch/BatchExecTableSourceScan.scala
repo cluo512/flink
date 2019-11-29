@@ -18,15 +18,20 @@
 
 package org.apache.flink.table.planner.plan.nodes.physical.batch
 
+import org.apache.flink.api.common.io.InputFormat
+import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.dag.Transformation
+import org.apache.flink.core.io.InputSplit
 import org.apache.flink.runtime.operators.DamBehavior
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
+import org.apache.flink.streaming.api.functions.source.InputFormatSourceFunction
 import org.apache.flink.table.api.TableException
 import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext
 import org.apache.flink.table.planner.delegation.BatchPlanner
 import org.apache.flink.table.planner.plan.nodes.exec.{BatchExecNode, ExecNode}
 import org.apache.flink.table.planner.plan.nodes.physical.PhysicalTableSourceScan
-import org.apache.flink.table.planner.plan.schema.FlinkRelOptTable
+import org.apache.flink.table.planner.plan.schema.TableSourceTable
 import org.apache.flink.table.planner.plan.utils.ScanUtil
 import org.apache.flink.table.planner.sources.TableSourceUtil
 import org.apache.flink.table.runtime.types.TypeInfoDataTypeConverter
@@ -48,13 +53,13 @@ import scala.collection.JavaConversions._
 class BatchExecTableSourceScan(
     cluster: RelOptCluster,
     traitSet: RelTraitSet,
-    relOptTable: FlinkRelOptTable)
-  extends PhysicalTableSourceScan(cluster, traitSet, relOptTable)
+    tableSourceTable: TableSourceTable[_])
+  extends PhysicalTableSourceScan(cluster, traitSet, tableSourceTable)
   with BatchPhysicalRel
   with BatchExecNode[BaseRow]{
 
   override def copy(traitSet: RelTraitSet, inputs: util.List[RelNode]): RelNode = {
-    new BatchExecTableSourceScan(cluster, traitSet, relOptTable)
+    new BatchExecTableSourceScan(cluster, traitSet, tableSourceTable)
   }
 
   override def computeSelfCost(planner: RelOptPlanner, mq: RelMetadataQuery): RelOptCost = {
@@ -87,8 +92,8 @@ class BatchExecTableSourceScan(
 
     val fieldIndexes = TableSourceUtil.computeIndexMapping(
       tableSource,
-      isStreamTable = false,
-      tableSourceTable.selectedFields)
+      tableSourceTable.getRowType,
+      tableSourceTable.isStreamingMode)
 
     val inputDataType = inputTransform.getOutputType
     val producedDataType = tableSource.getProducedDataType
@@ -104,7 +109,7 @@ class BatchExecTableSourceScan(
     // get expression to extract rowtime attribute
     val rowtimeExpression: Option[RexNode] = TableSourceUtil.getRowtimeExtractionExpression(
       tableSource,
-      tableSourceTable.selectedFields,
+      tableSourceTable.getRowType,
       cluster,
       planner.getRelBuilder
     )
@@ -127,13 +132,25 @@ class BatchExecTableSourceScan(
   def needInternalConversion: Boolean = {
     val fieldIndexes = TableSourceUtil.computeIndexMapping(
       tableSource,
-      isStreamTable = false,
-      tableSourceTable.selectedFields)
+      tableSourceTable.getRowType,
+      tableSourceTable.isStreamingMode)
     ScanUtil.hasTimeAttributeField(fieldIndexes) ||
       ScanUtil.needsConversion(tableSource.getProducedDataType)
   }
 
   def getEstimatedRowCount: lang.Double = {
     getCluster.getMetadataQuery.getRowCount(this)
+  }
+
+  override def createInput[IN](
+      env: StreamExecutionEnvironment,
+      format: InputFormat[IN, _ <: InputSplit],
+      t: TypeInformation[IN]): Transformation[IN] = {
+    // env.createInput will use ContinuousFileReaderOperator, but it do not support multiple
+    // paths. If read partitioned source, after partition pruning, we need let InputFormat
+    // to read multiple partitions which are multiple paths.
+    // We can use InputFormatSourceFunction directly to support InputFormat.
+    val func = new InputFormatSourceFunction[IN](format, t)
+    env.addSource(func, tableSource.explainSource(), t).getTransformation
   }
 }

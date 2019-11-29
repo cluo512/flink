@@ -21,6 +21,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.table.runtime.typeutils.BaseArraySerializer;
 import org.apache.flink.table.runtime.typeutils.BaseMapSerializer;
 import org.apache.flink.table.runtime.typeutils.BaseRowSerializer;
+import org.apache.flink.table.runtime.typeutils.BinaryGenericSerializer;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
 
@@ -62,13 +63,15 @@ public interface BinaryWriter {
 
 	void writeDecimal(int pos, Decimal value, int precision);
 
+	void writeTimestamp(int pos, SqlTimestamp value, int precision);
+
 	void writeArray(int pos, BaseArray value, BaseArraySerializer serializer);
 
 	void writeMap(int pos, BaseMap value, BaseMapSerializer serializer);
 
 	void writeRow(int pos, BaseRow value, BaseRowSerializer type);
 
-	void writeGeneric(int pos, BinaryGeneric value);
+	void writeGeneric(int pos, BinaryGeneric value, BinaryGenericSerializer serializer);
 
 	/**
 	 * Finally, complete write to set real size to binary.
@@ -123,8 +126,8 @@ public interface BinaryWriter {
 			case ROW:
 				writer.writeRow(pos, (BaseRow) o, (BaseRowSerializer) serializer);
 				break;
-			case ANY:
-				writer.writeGeneric(pos, (BinaryGeneric) o);
+			case RAW:
+				writer.writeGeneric(pos, (BinaryGeneric) o, (BinaryGenericSerializer) serializer);
 				break;
 			case BINARY:
 			case VARBINARY:

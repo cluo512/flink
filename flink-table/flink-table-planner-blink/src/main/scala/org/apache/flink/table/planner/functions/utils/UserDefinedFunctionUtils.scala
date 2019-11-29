@@ -32,7 +32,7 @@ import org.apache.flink.table.runtime.types.ClassLogicalTypeConverter.{getDefaul
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.{fromDataTypeToLogicalType, fromLogicalTypeToDataType}
 import org.apache.flink.table.runtime.types.TypeInfoDataTypeConverter.fromDataTypeToTypeInfo
 import org.apache.flink.table.runtime.types.TypeInfoLogicalTypeConverter.fromTypeInfoToLogicalType
-import org.apache.flink.table.runtime.typeutils.TypeCheckUtils.isAny
+import org.apache.flink.table.runtime.typeutils.TypeCheckUtils.isRaw
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.{LogicalType, LogicalTypeRoot, RowType}
 import org.apache.flink.table.types.utils.TypeConversions.fromLegacyInfoToDataType
@@ -170,7 +170,7 @@ object UserDefinedFunctionUtils {
     udiTypes.zipWithIndex.map {
       case (t: DataType, i) =>
         // we don't trust GenericType.
-        if (fromDataTypeToLogicalType(t).getTypeRoot == LogicalTypeRoot.ANY) {
+        if (fromDataTypeToLogicalType(t).getTypeRoot == LogicalTypeRoot.RAW) {
           val returnType = fromLogicalTypeToDataType(expectedTypes(i))
           if (expectedTypes(i).supportsOutputConversion(t.getConversionClass)) {
             returnType.bridgedTo(t.getConversionClass)
@@ -449,17 +449,17 @@ object UserDefinedFunctionUtils {
   /**
     * Create [[SqlFunction]] for a [[ScalarFunction]]
     *
-    * @param name function name
+    * @param identifier function identifier
     * @param function scalar function
     * @param typeFactory type factory
     * @return the ScalarSqlFunction
     */
   def createScalarSqlFunction(
-      name: String,
+      identifier: FunctionIdentifier,
       displayName: String,
       function: ScalarFunction,
       typeFactory: FlinkTypeFactory): SqlFunction = {
-    new ScalarSqlFunction(name, displayName, function, typeFactory)
+    new ScalarSqlFunction(identifier, displayName, function, typeFactory)
   }
 
   /**
@@ -478,34 +478,34 @@ object UserDefinedFunctionUtils {
     * For all the other cases, please use
     * createTableSqlFunction (String, String, TableFunction, FlinkTypeFactory) instead.
     *
-    * @param name function name
+    * @param identifier function identifier
     * @param tableFunction table function
     * @param implicitResultType the implicit type information of returned table
     * @param typeFactory type factory
     * @return the TableSqlFunction
     */
   def createTableSqlFunction(
-      name: String,
+      identifier: FunctionIdentifier,
       displayName: String,
       tableFunction: TableFunction[_],
       implicitResultType: DataType,
       typeFactory: FlinkTypeFactory): TableSqlFunction = {
     // we don't know the exact result type yet.
     val function = new DeferredTypeFlinkTableFunction(tableFunction, implicitResultType)
-    new TableSqlFunction(name, displayName, tableFunction, implicitResultType,
+    new TableSqlFunction(identifier, displayName, tableFunction, implicitResultType,
       typeFactory, function)
   }
 
   /**
     * Create [[SqlFunction]] for an [[AggregateFunction]]
     *
-    * @param name function name
+    * @param identifier function identifier
     * @param aggFunction aggregate function
     * @param typeFactory type factory
     * @return the TableSqlFunction
     */
   def createAggregateSqlFunction(
-      name: String,
+      identifier: FunctionIdentifier,
       displayName: String,
       aggFunction: AggregateFunction[_, _],
       externalResultType: DataType,
@@ -516,7 +516,7 @@ object UserDefinedFunctionUtils {
     checkAndExtractMethods(aggFunction, "accumulate")
 
     AggSqlFunction(
-      name,
+      identifier,
       displayName,
       aggFunction,
       externalResultType,
@@ -747,7 +747,7 @@ object UserDefinedFunctionUtils {
       internal: LogicalType,
       parameterType: DataType): Boolean = {
     val paraInternalType = fromDataTypeToLogicalType(parameterType)
-    if (isAny(internal) && isAny(paraInternalType)) {
+    if (isRaw(internal) && isRaw(paraInternalType)) {
       getDefaultExternalClassForType(internal) == getDefaultExternalClassForType(paraInternalType)
     } else {
       // There is a special equal to GenericType. We need rewrite type extract to BaseRow etc...

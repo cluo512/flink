@@ -34,7 +34,6 @@ import static org.apache.flink.client.cli.CliFrontendParser.CLASSPATH_OPTION;
 import static org.apache.flink.client.cli.CliFrontendParser.CLASS_OPTION;
 import static org.apache.flink.client.cli.CliFrontendParser.DETACHED_OPTION;
 import static org.apache.flink.client.cli.CliFrontendParser.JAR_OPTION;
-import static org.apache.flink.client.cli.CliFrontendParser.LOGGING_OPTION;
 import static org.apache.flink.client.cli.CliFrontendParser.PARALLELISM_OPTION;
 import static org.apache.flink.client.cli.CliFrontendParser.PYFILES_OPTION;
 import static org.apache.flink.client.cli.CliFrontendParser.PYMODULE_OPTION;
@@ -45,7 +44,7 @@ import static org.apache.flink.client.cli.CliFrontendParser.YARN_DETACHED_OPTION
 /**
  * Base class for command line options that refer to a JAR file program.
  */
-public abstract class ProgramOptions extends CommandLineOptions {
+public class ProgramOptions extends CommandLineOptions {
 
 	private final String jarFilePath;
 
@@ -56,8 +55,6 @@ public abstract class ProgramOptions extends CommandLineOptions {
 	private final String[] programArgs;
 
 	private final int parallelism;
-
-	private final boolean stdoutLogging;
 
 	private final boolean detachedMode;
 
@@ -70,7 +67,7 @@ public abstract class ProgramOptions extends CommandLineOptions {
 	 */
 	private final boolean isPython;
 
-	protected ProgramOptions(CommandLine line) throws CliArgsException {
+	public ProgramOptions(CommandLine line) throws CliArgsException {
 		super(line);
 
 		String[] args = line.hasOption(ARGS_OPTION.getOpt()) ?
@@ -171,9 +168,7 @@ public abstract class ProgramOptions extends CommandLineOptions {
 			parallelism = ExecutionConfig.PARALLELISM_DEFAULT;
 		}
 
-		stdoutLogging = !line.hasOption(LOGGING_OPTION.getOpt());
-		detachedMode = line.hasOption(DETACHED_OPTION.getOpt()) || line.hasOption(
-			YARN_DETACHED_OPTION.getOpt());
+		detachedMode = line.hasOption(DETACHED_OPTION.getOpt()) || line.hasOption(YARN_DETACHED_OPTION.getOpt());
 		shutdownOnAttachedExit = line.hasOption(SHUTDOWN_IF_ATTACHED_OPTION.getOpt());
 
 		this.savepointSettings = CliFrontendParser.createSavepointRestoreSettings(line);
@@ -197,10 +192,6 @@ public abstract class ProgramOptions extends CommandLineOptions {
 
 	public int getParallelism() {
 		return parallelism;
-	}
-
-	public boolean getStdoutLogging() {
-		return stdoutLogging;
 	}
 
 	public boolean getDetachedMode() {
