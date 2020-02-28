@@ -19,11 +19,8 @@
 package org.apache.flink.yarn;
 
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.ConfigOptions;
-import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.runtime.clusterframework.BootstrapTools;
 import org.apache.flink.runtime.clusterframework.ContaineredTaskManagerParameters;
-import org.apache.flink.runtime.entrypoint.parser.CommandLineOptions;
 import org.apache.flink.runtime.util.HadoopUtils;
 import org.apache.flink.util.StringUtils;
 
@@ -64,7 +61,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 
 import static org.apache.flink.yarn.YarnConfigKeys.ENV_FLINK_CLASSPATH;
 
@@ -90,32 +86,6 @@ public final class Utils {
 	/** Time to wait in milliseconds between each remote resources fetch in case of FileNotFoundException. */
 	public static final int REMOTE_RESOURCES_FETCH_WAIT_IN_MILLI = 100;
 
-	/**
-	 * See documentation.
-	 */
-	public static int calculateHeapSize(int memory, org.apache.flink.configuration.Configuration conf) {
-
-		float memoryCutoffRatio = conf.getFloat(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_RATIO);
-		int minCutoff = conf.getInteger(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_MIN);
-
-		if (memoryCutoffRatio > 1 || memoryCutoffRatio < 0) {
-			throw new IllegalArgumentException("The configuration value '"
-				+ ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_RATIO.key()
-				+ "' must be between 0 and 1. Value given=" + memoryCutoffRatio);
-		}
-		if (minCutoff > memory) {
-			throw new IllegalArgumentException("The configuration value '"
-				+ ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_MIN.key()
-				+ "' is higher (" + minCutoff + ") than the requested amount of memory " + memory);
-		}
-
-		int heapLimit = (int) ((float) memory * memoryCutoffRatio);
-		if (heapLimit < minCutoff) {
-			heapLimit = minCutoff;
-		}
-		return memory - heapLimit;
-	}
-
 	public static void setupYarnClassPath(Configuration conf, Map<String, String> appMasterEnv) {
 		addToEnvironment(
 			appMasterEnv,
@@ -127,6 +97,39 @@ public final class Utils {
 		for (String c : applicationClassPathEntries) {
 			addToEnvironment(appMasterEnv, Environment.CLASSPATH.name(), c.trim());
 		}
+	}
+
+	/**
+	 * Copy a local file to a remote file system and register as Local Resource.
+	 *
+	 * @param fs
+	 * 		remote filesystem
+	 * @param appId
+	 * 		application ID
+	 * @param localSrcPath
+	 * 		path to the local file
+	 * @param homedir
+	 * 		remote home directory base (will be extended)
+	 * @param relativeTargetPath
+	 * 		relative target path of the file (will be prefixed be the full home directory we set up)
+	 * @param replication
+	 * 	    number of replications of a remote file to be created
+	 *
+	 * @return Path to remote file (usually hdfs)
+	 */
+	static Tuple2<Path, LocalResource> setupLocalResource(
+		FileSystem fs,
+		String appId,
+		Path localSrcPath,
+		Path homedir,
+		String relativeTargetPath,
+		int replication) throws IOException {
+
+		File localFile = new File(localSrcPath.toUri().getPath());
+		Tuple2<Path, Long> remoteFileInfo = uploadLocalFileToRemote(fs, appId, localSrcPath, homedir, relativeTargetPath, replication);
+		// now create the resource instance
+		LocalResource resource = registerLocalResource(remoteFileInfo.f0, localFile.length(), remoteFileInfo.f1);
+		return Tuple2.of(remoteFileInfo.f0, resource);
 	}
 
 	/**
@@ -142,15 +145,18 @@ public final class Utils {
 	 * 		remote home directory base (will be extended)
 	 * @param relativeTargetPath
 	 * 		relative target path of the file (will be prefixed be the full home directory we set up)
+	 * @param replication
+	 * 	    number of replications of a remote file to be created
 	 *
 	 * @return Path to remote file (usually hdfs)
 	 */
-	static Tuple2<Path, LocalResource> setupLocalResource(
+	static Tuple2<Path, Long> uploadLocalFileToRemote(
 		FileSystem fs,
 		String appId,
 		Path localSrcPath,
 		Path homedir,
-		String relativeTargetPath) throws IOException {
+		String relativeTargetPath,
+		int replication) throws IOException {
 
 		File localFile = new File(localSrcPath.toUri().getPath());
 		if (localFile.isDirectory()) {
@@ -167,9 +173,9 @@ public final class Utils {
 
 		Path dst = new Path(homedir, suffix);
 
-		LOG.debug("Copying from {} to {}", localSrcPath, dst);
-
+		LOG.debug("Copying from {} to {} with replication number {}", localSrcPath, dst, replication);
 		fs.copyFromLocalFile(false, true, localSrcPath, dst);
+		fs.setReplication(dst, (short) replication);
 
 		// Note: If we directly used registerLocalResource(FileSystem, Path) here, we would access the remote
 		//       file once again which has problems with eventually consistent read-after-write file
@@ -202,10 +208,7 @@ public final class Utils {
 			dstModificationTime = localFile.lastModified();
 			LOG.debug("Failed to fetch remote modification time from {}, using local timestamp {}", dst, dstModificationTime);
 		}
-
-		// now create the resource instance
-		LocalResource resource = registerLocalResource(dst, localFile.length(), dstModificationTime);
-		return Tuple2.of(dst, resource);
+		return new Tuple2<>(dst, dstModificationTime);
 	}
 
 	/**
@@ -361,24 +364,6 @@ public final class Utils {
 	 */
 	private Utils() {
 		throw new RuntimeException();
-	}
-
-	/**
-	 * Method to extract environment variables from the flinkConfiguration based on the given prefix String.
-	 *
-	 * @param envPrefix Prefix for the environment variables key
-	 * @param flinkConfiguration The Flink config to get the environment variable definition from
-	 */
-	public static Map<String, String> getEnvironmentVariables(String envPrefix, org.apache.flink.configuration.Configuration flinkConfiguration) {
-		Map<String, String> result  = new HashMap<>();
-		for (Map.Entry<String, String> entry: flinkConfiguration.toMap().entrySet()) {
-			if (entry.getKey().startsWith(envPrefix) && entry.getKey().length() > envPrefix.length()) {
-				// remove prefix
-				String key = entry.getKey().substring(envPrefix.length());
-				result.put(key, entry.getValue());
-			}
-		}
-		return result;
 	}
 
 	/**
@@ -608,34 +593,6 @@ public final class Utils {
 		if (!condition) {
 			throw new RuntimeException(String.format(message, values));
 		}
-	}
-
-	/**
-	 * Get dynamic properties based on two Flink configuration. If base config does not contain and target config
-	 * contains the key or the value is different, it should be added to results. Otherwise, if the base config contains
-	 * and target config does not contain the key, it will be ignored.
-	 * @param baseConfig The base configuration.
-	 * @param targetConfig The target configuration.
-	 * @return Dynamic properties as string, separated by space.
-	 */
-	static String getDynamicProperties(
-		org.apache.flink.configuration.Configuration baseConfig,
-		org.apache.flink.configuration.Configuration targetConfig) {
-
-		String[] newAddedConfigs = targetConfig.keySet().stream().flatMap(
-			(String key) -> {
-				final String baseValue = baseConfig.getString(ConfigOptions.key(key).stringType().noDefaultValue());
-				final String targetValue = targetConfig.getString(ConfigOptions.key(key).stringType().noDefaultValue());
-
-				if (!baseConfig.keySet().contains(key) || !baseValue.equals(targetValue)) {
-					return Stream.of("-" + CommandLineOptions.DYNAMIC_PROPERTY_OPTION.getOpt() + key +
-						CommandLineOptions.DYNAMIC_PROPERTY_OPTION.getValueSeparator() + targetValue);
-				} else {
-					return Stream.empty();
-				}
-			})
-			.toArray(String[]::new);
-		return String.join(" ", newAddedConfigs);
 	}
 
 }

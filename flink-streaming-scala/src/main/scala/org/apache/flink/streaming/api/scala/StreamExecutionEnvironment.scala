@@ -27,6 +27,7 @@ import org.apache.flink.api.java.typeutils.ResultTypeQueryable
 import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer
 import org.apache.flink.api.scala.ClosureCleaner
 import org.apache.flink.configuration.{Configuration, ReadableConfig}
+import org.apache.flink.core.execution.{JobClient, JobListener}
 import org.apache.flink.runtime.state.AbstractStateBackend
 import org.apache.flink.runtime.state.StateBackend
 import org.apache.flink.streaming.api.environment.{StreamExecutionEnvironment => JavaEnv}
@@ -660,6 +661,8 @@ class StreamExecutionEnvironment(javaEnv: JavaEnv) {
    * 
    * The program execution will be logged and displayed with a generated
    * default name.
+   *
+   * @return The result of the job execution, containing elapsed time and accumulators.
    */
   def execute() = javaEnv.execute()
 
@@ -669,8 +672,63 @@ class StreamExecutionEnvironment(javaEnv: JavaEnv) {
    * for example printing results or forwarding them to a message queue.
    * 
    * The program execution will be logged and displayed with the provided name.
+   *
+   * @return The result of the job execution, containing elapsed time and accumulators.
    */
   def execute(jobName: String) = javaEnv.execute(jobName)
+
+  /**
+   * Register a [[JobListener]] in this environment. The [[JobListener]] will be
+   * notified on specific job status changed.
+   */
+  @PublicEvolving
+  def registerJobListener(jobListener: JobListener): Unit = {
+    javaEnv.registerJobListener(jobListener)
+  }
+
+  /**
+   * Clear all registered [[JobListener]]s.
+   */
+  @PublicEvolving def clearJobListeners(): Unit = {
+    javaEnv.clearJobListeners()
+  }
+
+  /**
+   * Triggers the program execution asynchronously. The environment will execute all parts of
+   * the program that have resulted in a "sink" operation. Sink operations are
+   * for example printing results or forwarding them to a message queue.
+   *
+   * The program execution will be logged and displayed with a generated
+   * default name.
+   *
+   * <b>ATTENTION:</b> The caller of this method is responsible for managing the lifecycle
+   * of the returned [[JobClient]]. This means calling [[JobClient#close()]] at the end of
+   * its usage. In other case, there may be resource leaks depending on the JobClient
+   * implementation.
+   *
+   * @return A [[JobClient]] that can be used to communicate with the submitted job,
+   *         completed on submission succeeded.
+   */
+  @PublicEvolving
+  def executeAsync(): JobClient = javaEnv.executeAsync()
+
+  /**
+   * Triggers the program execution asynchronously. The environment will execute all parts of
+   * the program that have resulted in a "sink" operation. Sink operations are
+   * for example printing results or forwarding them to a message queue.
+   *
+   * The program execution will be logged and displayed with the provided name.
+   *
+   * <b>ATTENTION:</b> The caller of this method is responsible for managing the lifecycle
+   * of the returned [[JobClient]]. This means calling [[JobClient#close()]] at the end of
+   * its usage. In other case, there may be resource leaks depending on the JobClient
+   * implementation.
+   *
+   * @return A [[JobClient]] that can be used to communicate with the submitted job,
+   *         completed on submission succeeded.
+   */
+  @PublicEvolving
+  def executeAsync(jobName: String): JobClient = javaEnv.executeAsync(jobName)
 
   /**
    * Creates the plan with which the system will execute the program, and
@@ -682,11 +740,39 @@ class StreamExecutionEnvironment(javaEnv: JavaEnv) {
 
   /**
    * Getter of the [[org.apache.flink.streaming.api.graph.StreamGraph]] of the streaming job.
+   * This call clears previously registered
+   * [[org.apache.flink.api.dag.Transformation transformations]].
    *
    * @return The StreamGraph representing the transformations
    */
   @Internal
   def getStreamGraph = javaEnv.getStreamGraph
+
+  /**
+   * Getter of the [[org.apache.flink.streaming.api.graph.StreamGraph]] of the streaming job.
+   * This call clears previously registered
+   * [[org.apache.flink.api.dag.Transformation transformations]].
+   *
+   * @param jobName Desired name of the job
+   * @return The StreamGraph representing the transformations
+   */
+  @Internal
+  def getStreamGraph(jobName: String) = javaEnv.getStreamGraph(jobName)
+
+  /**
+   * Getter of the [[org.apache.flink.streaming.api.graph.StreamGraph]] of the streaming job
+   * with the option to clear previously registered
+   * [[org.apache.flink.api.dag.Transformation transformations]]. Clearing the transformations
+   * allows, for example, to not re-execute the same operations when calling
+   * [[execute()]] multiple times.
+   *
+   * @param jobName Desired name of the job
+   * @param clearTransformations Whether or not to clear previously registered transformations
+   * @return The StreamGraph representing the transformations
+   */
+  @Internal
+  def getStreamGraph(jobName: String, clearTransformations: Boolean) =
+    javaEnv.getStreamGraph(jobName, clearTransformations)
 
   /**
    * Getter of the wrapped [[org.apache.flink.streaming.api.environment.StreamExecutionEnvironment]]

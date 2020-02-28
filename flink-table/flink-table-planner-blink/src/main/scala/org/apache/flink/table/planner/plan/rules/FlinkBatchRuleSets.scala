@@ -359,6 +359,9 @@ object FlinkBatchRuleSets {
     CalcSnapshotTransposeRule.INSTANCE,
     // Rule that splits python ScalarFunctions from join conditions
     SplitPythonConditionFromJoinRule.INSTANCE,
+    // Rule that splits python ScalarFunctions from
+    // java/scala ScalarFunctions in correlate conditions
+    SplitPythonConditionFromCorrelateRule.INSTANCE,
     // merge calc after calc transpose
     FlinkCalcMergeRule.INSTANCE,
     // Rule that splits python ScalarFunctions from java/scala ScalarFunctions
@@ -412,6 +415,7 @@ object FlinkBatchRuleSets {
     // correlate
     BatchExecConstantTableFunctionScanRule.INSTANCE,
     BatchExecCorrelateRule.INSTANCE,
+    BatchExecPythonCorrelateRule.INSTANCE,
     // sink
     BatchExecSinkRule.INSTANCE
   )

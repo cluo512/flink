@@ -19,18 +19,17 @@
 package org.apache.flink.client.program;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.JobSubmissionResult;
+import org.apache.flink.api.common.accumulators.AccumulatorHelper;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobmaster.JobResult;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.util.ExceptionUtils;
-import org.apache.flink.util.OptionalFailure;
-import org.apache.flink.util.SerializedValue;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,7 +38,6 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -66,8 +64,8 @@ public class MiniClusterClient implements ClusterClient<MiniClusterClient.MiniCl
 	}
 
 	@Override
-	public CompletableFuture<JobSubmissionResult> submitJob(@Nonnull JobGraph jobGraph) {
-		return miniCluster.submitJob(jobGraph);
+	public CompletableFuture<JobID> submitJob(@Nonnull JobGraph jobGraph) {
+		return miniCluster.submitJob(jobGraph).thenApply(JobSubmissionResult::getJobID);
 	}
 
 	@Override
@@ -106,26 +104,27 @@ public class MiniClusterClient implements ClusterClient<MiniClusterClient.MiniCl
 	}
 
 	@Override
-	public CompletableFuture<Map<String, OptionalFailure<Object>>> getAccumulators(JobID jobID, ClassLoader loader) {
+	public CompletableFuture<Map<String, Object>> getAccumulators(JobID jobID, ClassLoader loader) {
 		return miniCluster
 			.getExecutionGraph(jobID)
 			.thenApply(AccessExecutionGraph::getAccumulatorsSerialized)
 			.thenApply(accumulators -> {
-				Map<String, OptionalFailure<Object>> result = new HashMap<>(accumulators.size());
-				for (Map.Entry<String, SerializedValue<OptionalFailure<Object>>> acc : accumulators.entrySet()) {
-					try {
-						result.put(acc.getKey(), acc.getValue().deserializeValue(loader));
-					} catch (Exception e) {
-						throw new CompletionException("Cannot deserialize accumulators.", e);
-					}
+				try {
+					return AccumulatorHelper.deserializeAndUnwrapAccumulators(accumulators, loader);
+				} catch (Exception e) {
+					throw new CompletionException("Cannot deserialize and unwrap accumulators properly.", e);
 				}
-				return result;
 			});
 	}
 
 	@Override
 	public CompletableFuture<JobStatus> getJobStatus(JobID jobId) {
 		return miniCluster.getJobStatus(jobId);
+	}
+
+	@Override
+	public void close() {
+
 	}
 
 	@Override
@@ -156,7 +155,10 @@ public class MiniClusterClient implements ClusterClient<MiniClusterClient.MiniCl
 		}
 	}
 
-	enum MiniClusterId {
+	/**
+	 * The type of the Cluster ID for the local {@link MiniCluster}.
+	 */
+	public enum MiniClusterId {
 		INSTANCE
 	}
 }

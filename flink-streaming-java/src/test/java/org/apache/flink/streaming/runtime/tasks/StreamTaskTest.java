@@ -24,7 +24,6 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
 import org.apache.flink.core.fs.FSDataInputStream;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.blob.BlobCacheService;
@@ -97,6 +96,7 @@ import org.apache.flink.runtime.taskexecutor.PartitionProducerStateChecker;
 import org.apache.flink.runtime.taskexecutor.TestGlobalAggregateManager;
 import org.apache.flink.runtime.taskmanager.CheckpointResponder;
 import org.apache.flink.runtime.taskmanager.NoOpTaskManagerActions;
+import org.apache.flink.runtime.taskmanager.NoOpTaskOperatorEventGateway;
 import org.apache.flink.runtime.taskmanager.Task;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.runtime.taskmanager.TaskManagerActions;
@@ -106,13 +106,15 @@ import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.InternalTimeServiceManager;
 import org.apache.flink.streaming.api.operators.MailboxExecutor;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OperatorSnapshotFutures;
 import org.apache.flink.streaming.api.operators.Output;
+import org.apache.flink.streaming.api.operators.StreamMap;
 import org.apache.flink.streaming.api.operators.StreamOperator;
-import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorStateContext;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.streaming.api.operators.StreamTaskStateInitializer;
@@ -128,6 +130,7 @@ import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.function.RunnableWithException;
 import org.apache.flink.util.function.SupplierWithException;
 
 import org.junit.Assert;
@@ -162,7 +165,6 @@ import java.util.concurrent.TimeoutException;
 
 import static org.apache.flink.streaming.util.StreamTaskUtil.waitTaskIsRunning;
 import static org.apache.flink.util.Preconditions.checkState;
-import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.sameInstance;
@@ -316,27 +318,7 @@ public class StreamTaskTest extends TestLogger {
 	}
 
 	@Test
-	public void testCancellationNotBlockedOnLock() throws Exception {
-		syncLatch = new OneShotLatch();
-
-		StreamConfig cfg = new StreamConfig(new Configuration());
-		Task task = createTask(CancelLockingTask.class, cfg, new Configuration());
-
-		// start the task and wait until it runs
-		// execution state RUNNING is not enough, we need to wait until the stream task's run() method
-		// is entered
-		task.startTaskThread();
-		syncLatch.await();
-
-		// cancel the execution - this should lead to smooth shutdown
-		task.cancelExecution();
-		task.getExecutingThread().join();
-
-		assertEquals(ExecutionState.CANCELED, task.getExecutionState());
-	}
-
-	@Test
-	public void testCancellationFailsWithBlockingLock() throws Exception {
+	public void testCanceleablesCanceledOnCancelTaskError() throws Exception {
 		syncLatch = new OneShotLatch();
 
 		StreamConfig cfg = new StreamConfig(new Configuration());
@@ -355,6 +337,134 @@ public class StreamTaskTest extends TestLogger {
 		assertEquals(ExecutionState.CANCELED, task.getExecutionState());
 	}
 
+	/**
+	 * A task that locks for ever, fail in {@link #cancelTask()}. It can be only shut down cleanly
+	 * if {@link StreamTask#getCancelables()} are closed properly.
+	 */
+	public static class CancelFailingTask extends StreamTask<String, AbstractStreamOperator<String>> {
+
+		public CancelFailingTask(Environment env) {
+			super(env);
+		}
+
+		@Override
+		protected void init() {}
+
+		@Override
+		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
+			final OneShotLatch latch = new OneShotLatch();
+			final Object lock = new Object();
+
+			LockHolder holder = new LockHolder(lock, latch);
+			holder.start();
+			try {
+				// cancellation should try and cancel this
+				getCancelables().registerCloseable(holder);
+
+				// wait till the lock holder has the lock
+				latch.await();
+
+				// we are at the point where cancelling can happen
+				syncLatch.trigger();
+
+				// try to acquire the lock - this is not possible as long as the lock holder
+				// thread lives
+				//noinspection SynchronizationOnLocalVariableOrMethodParameter
+				synchronized (lock) {
+					// nothing
+				}
+			}
+			finally {
+				holder.close();
+			}
+			controller.allActionsCompleted();
+		}
+
+		@Override
+		protected void cleanup() {}
+
+		@Override
+		protected void cancelTask() throws Exception {
+			throw new Exception("test exception");
+		}
+
+		/**
+		 * A thread that holds a lock as long as it lives.
+		 */
+		private static final class LockHolder extends Thread implements Closeable {
+
+			private final OneShotLatch trigger;
+			private final Object lock;
+			private volatile boolean canceled;
+
+			private LockHolder(Object lock, OneShotLatch trigger) {
+				this.lock = lock;
+				this.trigger = trigger;
+			}
+
+			@Override
+			public void run() {
+				synchronized (lock) {
+					while (!canceled) {
+						// signal that we grabbed the lock
+						trigger.trigger();
+
+						// basically freeze this thread
+						try {
+							//noinspection SleepWhileHoldingLock
+							Thread.sleep(1000000000);
+						} catch (InterruptedException ignored) {}
+					}
+				}
+			}
+
+			public void cancel() {
+				canceled = true;
+			}
+
+			@Override
+			public void close() {
+				canceled = true;
+				interrupt();
+			}
+		}
+	}
+
+	/**
+	 *  CancelTaskException can be thrown in a down stream task, for example if an upstream task
+	 *  was cancelled first and those two tasks were connected via
+	 *  {@link org.apache.flink.runtime.io.network.partition.consumer.LocalInputChannel}.
+	 *  {@link StreamTask} should be able to correctly handle such situation.
+	 */
+	@Test
+	public void testCancelTaskExceptionHandling() throws Exception {
+		StreamConfig cfg = new StreamConfig(new Configuration());
+		Task task = createTask(CancelThrowingTask.class, cfg, new Configuration());
+
+		task.startTaskThread();
+		task.getExecutingThread().join();
+
+		assertEquals(ExecutionState.CANCELED, task.getExecutionState());
+	}
+
+	/**
+	 * A task that throws {@link CancelTaskException}.
+	 */
+	public static class CancelThrowingTask extends StreamTask<String, AbstractStreamOperator<String>> {
+
+		public CancelThrowingTask(Environment env) {
+			super(env);
+		}
+
+		@Override
+		protected void init() {}
+
+		@Override
+		protected void processInput(MailboxDefaultAction.Controller controller) {
+			throw new CancelTaskException();
+		}
+	}
+
 	@Test
 	public void testDecliningCheckpointStreamOperator() throws Exception {
 		DeclineDummyEnvironment declineDummyEnvironment = new DeclineDummyEnvironment();
@@ -368,9 +478,10 @@ public class StreamTaskTest extends TestLogger {
 		RunningTask<MockStreamTask> task = runTask(() -> createMockStreamTask(
 			declineDummyEnvironment,
 			operatorChain(
+				streamOperatorWithSnapshotException(testException),
 				streamOperatorWithSnapshot(operatorSnapshotResult1),
-				streamOperatorWithSnapshot(operatorSnapshotResult2),
-				streamOperatorWithSnapshotException(testException))));
+				streamOperatorWithSnapshot(operatorSnapshotResult2)
+				)));
 		MockStreamTask streamTask = task.streamTask;
 
 		waitTaskIsRunning(streamTask, task.invocationFuture);
@@ -628,7 +739,7 @@ public class StreamTaskTest extends TestLogger {
 			DoneFuture.of(SnapshotResult.of(managedOperatorStateHandle)),
 			DoneFuture.of(SnapshotResult.of(rawOperatorStateHandle)));
 
-		final StreamOperator<?> streamOperator = streamOperatorWithSnapshot(operatorSnapshotResult);
+		final OneInputStreamOperator<String, String> streamOperator = streamOperatorWithSnapshot(operatorSnapshotResult);
 
 		final AcknowledgeDummyEnvironment mockEnvironment = new AcknowledgeDummyEnvironment();
 
@@ -705,7 +816,7 @@ public class StreamTaskTest extends TestLogger {
 			checkpointResponder);
 
 		// mock the operator with empty snapshot result (all state handles are null)
-		StreamOperator<?> statelessOperator = streamOperatorWithSnapshot(new OperatorSnapshotFutures());
+		OneInputStreamOperator<String, String> statelessOperator = streamOperatorWithSnapshot(new OperatorSnapshotFutures());
 
 		try (MockEnvironment mockEnvironment = new MockEnvironmentBuilder()
 			.setTaskStateManager(taskStateManager)
@@ -749,7 +860,7 @@ public class StreamTaskTest extends TestLogger {
 		try (MockEnvironment mockEnvironment =
 				new MockEnvironmentBuilder()
 					.setTaskName("Test Task")
-					.setMemorySize(32L * 1024L)
+					.setManagedMemorySize(32L * 1024L)
 					.setInputSplitProvider(new MockInputSplitProvider())
 					.setBufferSize(1)
 					.setTaskConfiguration(taskConfiguration)
@@ -798,7 +909,15 @@ public class StreamTaskTest extends TestLogger {
 	 */
 	@Test
 	public void testThreadInvariants() throws Throwable {
-		try (MockEnvironment mockEnvironment = new MockEnvironmentBuilder().build()) {
+		Configuration taskConfiguration = new Configuration();
+		StreamConfig streamConfig = new StreamConfig(taskConfiguration);
+		streamConfig.setStreamOperator(new StreamMap<>(value -> value));
+		streamConfig.setOperatorID(new OperatorID());
+		try (MockEnvironment mockEnvironment =
+				new MockEnvironmentBuilder()
+					.setTaskConfiguration(taskConfiguration)
+					.build()) {
+
 			ClassLoader taskClassLoader = new TestUserCodeClassLoader();
 
 			RunningTask<ThreadInspectingTask> runningTask = runTask(() -> {
@@ -808,40 +927,6 @@ public class StreamTaskTest extends TestLogger {
 			runningTask.invocationFuture.get();
 
 			assertThat(runningTask.streamTask.getTaskClassLoader(), is(sameInstance(taskClassLoader)));
-		}
-	}
-
-	@Test
-	public void testOperatorNotSupportedByNonNetworkCreditMode() throws Exception {
-
-		// test the operator which implements InputSelectable
-		Configuration taskConfiguration = new Configuration();
-		StreamConfig streamConfig = new StreamConfig(taskConfiguration);
-		streamConfig.setStreamOperator(new TestSequentialReadingStreamOperator("test operator"));
-		streamConfig.setOperatorID(new OperatorID());
-
-		Configuration taskManagerConfig = new Configuration();
-		taskManagerConfig.setBoolean(NettyShuffleEnvironmentOptions.NETWORK_CREDIT_MODEL, false);
-
-		try (MockEnvironment mockEnvironment =
-			new MockEnvironmentBuilder()
-				.setTaskManagerRuntimeInfo(new TestingTaskManagerRuntimeInfo(taskManagerConfig))
-				.setTaskConfiguration(taskConfiguration)
-				.build()) {
-
-			StreamTask<String, TestSequentialReadingStreamOperator> streamTask =
-				new NoOpStreamTask<>(mockEnvironment);
-
-			try {
-				streamTask.invoke();
-				fail("should fail with an exception");
-			} catch (UnsupportedOperationException uoe) {
-				// this is what we expect
-				assertThat(uoe.getMessage(),
-					startsWith("The operator that implements the InputSelectable interface is not supported"));
-			} catch (Throwable t) {
-				fail("should fail with an UnsupportedOperationException");
-			}
 		}
 	}
 
@@ -856,7 +941,7 @@ public class StreamTaskTest extends TestLogger {
 		streamConfig.setStreamOperatorFactory(new UnusedOperatorFactory());
 
 		// Make sure that there is some output edge in the config so that some RecordWriter is created
-		StreamConfigChainer cfg = new StreamConfigChainer(new OperatorID(42, 42), streamConfig);
+		StreamConfigChainer cfg = new StreamConfigChainer(new OperatorID(42, 42), streamConfig, this);
 		cfg.chain(
 			new OperatorID(44, 44),
 			new UnusedOperatorFactory(),
@@ -913,7 +998,7 @@ public class StreamTaskTest extends TestLogger {
 			final AvailabilityTestStreamTask task = new AvailabilityTestStreamTask<>(environment, inputProcessor);
 			final MailboxExecutor executor = task.mailboxProcessor.getMainMailboxExecutor();
 
-			final Runnable completeFutureTask = () -> {
+			final RunnableWithException completeFutureTask = () -> {
 				assertEquals(1, inputProcessor.currentNumProcessCalls);
 				assertTrue(task.mailboxProcessor.isDefaultActionUnavailable());
 				environment.getWriter(1).getAvailableFuture().complete(null);
@@ -948,8 +1033,9 @@ public class StreamTaskTest extends TestLogger {
 	//  Test Utilities
 	// ------------------------------------------------------------------------
 
-	private static StreamOperator<?> streamOperatorWithSnapshot(OperatorSnapshotFutures operatorSnapshotResult) throws Exception {
-		StreamOperator<?> operator = mock(StreamOperator.class);
+	private static <T> OneInputStreamOperator<T, T> streamOperatorWithSnapshot(OperatorSnapshotFutures operatorSnapshotResult) throws Exception {
+		@SuppressWarnings("unchecked")
+		OneInputStreamOperator<T, T> operator = mock(OneInputStreamOperator.class);
 		when(operator.getOperatorID()).thenReturn(new OperatorID());
 
 		when(operator.snapshotState(anyLong(), anyLong(), any(CheckpointOptions.class), any(CheckpointStreamFactory.class)))
@@ -958,8 +1044,9 @@ public class StreamTaskTest extends TestLogger {
 		return operator;
 	}
 
-	private static StreamOperator<?> streamOperatorWithSnapshotException(Exception exception) throws Exception {
-		StreamOperator<?> operator = mock(StreamOperator.class);
+	private static <T> OneInputStreamOperator<T, T> streamOperatorWithSnapshotException(Exception exception) throws Exception {
+		@SuppressWarnings("unchecked")
+		OneInputStreamOperator<T, T> operator = mock(OneInputStreamOperator.class);
 		when(operator.getOperatorID()).thenReturn(new OperatorID());
 
 		when(operator.snapshotState(anyLong(), anyLong(), any(CheckpointOptions.class), any(CheckpointStreamFactory.class)))
@@ -968,10 +1055,8 @@ public class StreamTaskTest extends TestLogger {
 		return operator;
 	}
 
-	private static <T> OperatorChain<T, AbstractStreamOperator<T>> operatorChain(StreamOperator<?>... streamOperators) {
-		OperatorChain<T, AbstractStreamOperator<T>> operatorChain = mock(OperatorChain.class);
-		when(operatorChain.getAllOperators()).thenReturn(streamOperators);
-		return operatorChain;
+	private static <T> OperatorChain<T, AbstractStreamOperator<T>> operatorChain(OneInputStreamOperator<T, T>... streamOperators) throws Exception {
+		return OperatorChainTest.setupOperatorChain(streamOperators);
 	}
 
 	private static class RunningTask<T extends StreamTask<?, ?>> {
@@ -1181,6 +1266,7 @@ public class StreamTaskTest extends TestLogger {
 			taskManagerActions,
 			mock(InputSplitProvider.class),
 			mock(CheckpointResponder.class),
+			new NoOpTaskOperatorEventGateway(),
 			new TestGlobalAggregateManager(),
 			blobService,
 			libCache,
@@ -1415,107 +1501,6 @@ public class StreamTaskTest extends TestLogger {
 		}
 	}
 
-	/**
-	 * A task that locks if cancellation attempts to cleanly shut down.
-	 */
-	public static class CancelLockingTask extends StreamTask<String, AbstractStreamOperator<String>> {
-
-		private final OneShotLatch latch = new OneShotLatch();
-
-		private LockHolder holder;
-
-		public CancelLockingTask(Environment env) {
-			super(env);
-		}
-
-		@Override
-		protected void init() {}
-
-		@Override
-		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
-			holder = new LockHolder(getCheckpointLock(), latch);
-			holder.start();
-			latch.await();
-
-			// we are at the point where cancelling can happen
-			syncLatch.trigger();
-
-			// just put this to sleep until it is interrupted
-			try {
-				Thread.sleep(100000000);
-			} catch (InterruptedException ignored) {
-				// restore interruption state
-				Thread.currentThread().interrupt();
-			}
-			controller.allActionsCompleted();
-		}
-
-		@Override
-		protected void cleanup() {
-			holder.close();
-		}
-
-		@Override
-		protected void cancelTask() {
-			holder.cancel();
-			// do not interrupt the lock holder here, to simulate spawned threads that
-			// we cannot properly interrupt on cancellation
-		}
-
-	}
-
-	/**
-	 * A task that locks if cancellation attempts to cleanly shut down.
-	 */
-	public static class CancelFailingTask extends StreamTask<String, AbstractStreamOperator<String>> {
-
-		public CancelFailingTask(Environment env) {
-			super(env);
-		}
-
-		@Override
-		protected void init() {}
-
-		@Override
-		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
-			final OneShotLatch latch = new OneShotLatch();
-			final Object lock = new Object();
-
-			LockHolder holder = new LockHolder(lock, latch);
-			holder.start();
-			try {
-				// cancellation should try and cancel this
-				getCancelables().registerCloseable(holder);
-
-				// wait till the lock holder has the lock
-				latch.await();
-
-				// we are at the point where cancelling can happen
-				syncLatch.trigger();
-
-				// try to acquire the lock - this is not possible as long as the lock holder
-				// thread lives
-				//noinspection SynchronizationOnLocalVariableOrMethodParameter
-				synchronized (lock) {
-					// nothing
-				}
-			}
-			finally {
-				holder.close();
-			}
-			controller.allActionsCompleted();
-		}
-
-		@Override
-		protected void cleanup() {}
-
-		@Override
-		protected void cancelTask() throws Exception {
-			throw new Exception("test exception");
-		}
-
-	}
-
 	private static class ThreadInspectingTask extends StreamTask<String, AbstractStreamOperator<String>> {
 
 		private final long taskThreadId;
@@ -1541,7 +1526,7 @@ public class StreamTaskTest extends TestLogger {
 			checkTaskThreadInfo();
 
 			// Create a time trigger to validate that it would also be invoked in the task's thread.
-			getProcessingTimeService(0).registerTimer(0, new ProcessingTimeCallback() {
+			getHeadOperator().getProcessingTimeService().registerTimer(0, new ProcessingTimeCallback() {
 				@Override
 				public void onProcessingTime(long timestamp) throws Exception {
 					checkTaskThreadInfo();
@@ -1585,47 +1570,6 @@ public class StreamTaskTest extends TestLogger {
 
 	// ------------------------------------------------------------------------
 	// ------------------------------------------------------------------------
-
-	/**
-	 * A thread that holds a lock as long as it lives.
-	 */
-	private static final class LockHolder extends Thread implements Closeable {
-
-		private final OneShotLatch trigger;
-		private final Object lock;
-		private volatile boolean canceled;
-
-		private LockHolder(Object lock, OneShotLatch trigger) {
-			this.lock = lock;
-			this.trigger = trigger;
-		}
-
-		@Override
-		public void run() {
-			synchronized (lock) {
-				while (!canceled) {
-					// signal that we grabbed the lock
-					trigger.trigger();
-
-					// basically freeze this thread
-					try {
-						//noinspection SleepWhileHoldingLock
-						Thread.sleep(1000000000);
-					} catch (InterruptedException ignored) {}
-				}
-			}
-		}
-
-		public void cancel() {
-			canceled = true;
-		}
-
-		@Override
-		public void close() {
-			canceled = true;
-			interrupt();
-		}
-	}
 
 	static class TestStreamSource<OUT, SRC extends SourceFunction<OUT>> extends StreamSource<OUT, SRC> {
 
@@ -1848,7 +1792,7 @@ public class StreamTaskTest extends TestLogger {
 		}
 	}
 
-	private static class UnusedOperatorFactory implements StreamOperatorFactory<String> {
+	private static class UnusedOperatorFactory extends AbstractStreamOperatorFactory<String> {
 		@Override
 		public <T extends StreamOperator<String>> T createStreamOperator(
 				StreamTask<?, ?> containingTask,
@@ -1859,11 +1803,6 @@ public class StreamTaskTest extends TestLogger {
 
 		@Override
 		public void setChainingStrategy(ChainingStrategy strategy) {
-		}
-
-		@Override
-		public ChainingStrategy getChainingStrategy() {
-			return ChainingStrategy.ALWAYS;
 		}
 
 		@Override

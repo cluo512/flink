@@ -19,8 +19,19 @@ package org.apache.flink.streaming.api.environment;
 
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.client.program.ContextEnvironment;
+import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.core.execution.DetachedJobExecutionResult;
+import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.streaming.api.graph.StreamGraph;
+import org.apache.flink.util.ShutdownHookUtil;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -31,6 +42,8 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 @PublicEvolving
 public class StreamContextEnvironment extends StreamExecutionEnvironment {
+
+	private static final Logger LOG = LoggerFactory.getLogger(ExecutionEnvironment.class);
 
 	private final ContextEnvironment ctx;
 
@@ -47,10 +60,41 @@ public class StreamContextEnvironment extends StreamExecutionEnvironment {
 
 	@Override
 	public JobExecutionResult execute(StreamGraph streamGraph) throws Exception {
-		transformations.clear();
+		JobClient jobClient = executeAsync(streamGraph);
 
-		final JobExecutionResult jobExecutionResult = super.execute(streamGraph);
-		ctx.setJobExecutionResult(jobExecutionResult);
+		JobExecutionResult jobExecutionResult;
+		if (getConfiguration().getBoolean(DeploymentOptions.ATTACHED)) {
+			CompletableFuture<JobExecutionResult> jobExecutionResultFuture =
+					jobClient.getJobExecutionResult(ctx.getUserCodeClassLoader());
+
+			if (getConfiguration().getBoolean(DeploymentOptions.SHUTDOWN_IF_ATTACHED)) {
+				Thread shutdownHook = ShutdownHookUtil.addShutdownHook(
+						() -> {
+							// wait a smidgen to allow the async request to go through before
+							// the jvm exits
+							jobClient.cancel().get(1, TimeUnit.SECONDS);
+						},
+						ContextEnvironment.class.getSimpleName(),
+						LOG);
+				jobExecutionResultFuture.whenComplete((ignored, throwable) ->
+						ShutdownHookUtil.removeShutdownHook(shutdownHook, ContextEnvironment.class.getSimpleName(), LOG));
+			}
+
+			jobExecutionResult = jobExecutionResultFuture.get();
+			System.out.println(jobExecutionResult);
+		} else {
+			jobExecutionResult = new DetachedJobExecutionResult(jobClient.getJobID());
+		}
+
 		return jobExecutionResult;
+	}
+
+	@Override
+	public JobClient executeAsync(StreamGraph streamGraph) throws Exception {
+		final JobClient jobClient = super.executeAsync(streamGraph);
+
+		System.out.println("Job has been submitted with JobID " + jobClient.getJobID());
+
+		return jobClient;
 	}
 }

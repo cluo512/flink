@@ -50,7 +50,8 @@ class ExecutionEnvironmentCompletenessTests(PythonAPICompletenessTestCase,
                 'startNewSession', 'fromCollection', 'readTextFileWithValue', 'registerDataSink',
                 'createCollectionsEnvironment', 'readFile', 'readFileOfPrimitives',
                 'generateSequence', 'areExplicitEnvironmentsAllowed', 'createInput',
-                'getUserCodeClassLoader', 'getExecutorServiceLoader', 'getConfiguration'}
+                'getUserCodeClassLoader', 'getExecutorServiceLoader', 'getConfiguration',
+                'executeAsync', 'registerJobListener', 'clearJobListeners', 'configure'}
 
 
 if __name__ == '__main__':

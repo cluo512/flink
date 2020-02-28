@@ -18,22 +18,22 @@
 
 package org.apache.flink.yarn;
 
-import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.client.deployment.ClusterSpecification;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.configuration.AkkaOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobmaster.JobResult;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.yarn.configuration.YarnConfigOptions;
+import org.apache.flink.yarn.testjob.YarnTestCacheJob;
 import org.apache.flink.yarn.util.YarnTestUtils;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.api.records.YarnApplicationState;
-import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
@@ -48,16 +48,14 @@ import static org.apache.flink.yarn.configuration.YarnConfigOptions.CLASSPATH_IN
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.Assert.assertThat;
-import static org.junit.Assert.fail;
 
 /**
  * Test cases for the deployment of Yarn Flink clusters.
  */
 public class YARNITCase extends YarnTestBase {
 
-	private final Duration yarnAppTerminateTimeout = Duration.ofSeconds(10);
-
-	private final int sleepIntervalInMS = 100;
+	private static final Duration yarnAppTerminateTimeout = Duration.ofSeconds(10);
+	private static final int sleepIntervalInMS = 100;
 
 	@Rule
 	public final TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -70,27 +68,27 @@ public class YARNITCase extends YarnTestBase {
 
 	@Test
 	public void testPerJobModeWithEnableSystemClassPathIncludeUserJar() throws Exception {
-		runTest(() -> deployPerjob(YarnConfigOptions.UserJarInclusion.FIRST));
+		runTest(() -> deployPerJob(
+			createDefaultConfiguration(YarnConfigOptions.UserJarInclusion.FIRST),
+			getTestingJobGraph()));
 	}
 
 	@Test
 	public void testPerJobModeWithDisableSystemClassPathIncludeUserJar() throws Exception {
-		runTest(() -> deployPerjob(YarnConfigOptions.UserJarInclusion.DISABLED));
+		runTest(() -> deployPerJob(
+			createDefaultConfiguration(YarnConfigOptions.UserJarInclusion.DISABLED),
+			getTestingJobGraph()));
 	}
 
-	private void deployPerjob(YarnConfigOptions.UserJarInclusion userJarInclusion) throws Exception {
+	@Test
+	public void testPerJobModeWithDistributedCache() throws Exception {
+		runTest(() -> deployPerJob(
+			createDefaultConfiguration(YarnConfigOptions.UserJarInclusion.DISABLED),
+			YarnTestCacheJob.getDistributedCacheJobGraph(tmp.newFolder())));
+	}
 
-		Configuration configuration = new Configuration();
-		configuration.setString(AkkaOptions.ASK_TIMEOUT, "30 s");
-		configuration.setString(CLASSPATH_INCLUDE_USER_JAR, userJarInclusion.toString());
-
-		final YarnClient yarnClient = getYarnClient();
-
-		try (final YarnClusterDescriptor yarnClusterDescriptor = new YarnClusterDescriptor(
-			configuration,
-			getYarnConfiguration(),
-			yarnClient,
-			true)) {
+	private void deployPerJob(Configuration configuration, JobGraph jobGraph) throws Exception {
+		try (final YarnClusterDescriptor yarnClusterDescriptor = createYarnClusterDescriptor(configuration)) {
 
 			yarnClusterDescriptor.setLocalJarPath(new Path(flinkUberjar.getAbsolutePath()));
 			yarnClusterDescriptor.addShipFiles(Arrays.asList(flinkLibFolder.listFiles()));
@@ -100,25 +98,17 @@ public class YARNITCase extends YarnTestBase {
 				.setMasterMemoryMB(768)
 				.setTaskManagerMemoryMB(1024)
 				.setSlotsPerTaskManager(1)
-				.setNumberTaskManagers(1)
 				.createClusterSpecification();
-
-			StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-			env.setParallelism(2);
-
-			env.addSource(new NoDataSource())
-				.shuffle()
-				.addSink(new DiscardingSink<>());
-
-			final JobGraph jobGraph = env.getStreamGraph().getJobGraph();
 
 			File testingJar = YarnTestBase.findFile("..", new YarnTestUtils.TestJarFinder("flink-yarn-tests"));
 
 			jobGraph.addJar(new org.apache.flink.core.fs.Path(testingJar.toURI()));
-			try (ClusterClient<ApplicationId> clusterClient = yarnClusterDescriptor.deployJobCluster(
-				clusterSpecification,
-				jobGraph,
-				false)) {
+			try (ClusterClient<ApplicationId> clusterClient = yarnClusterDescriptor
+					.deployJobCluster(
+							clusterSpecification,
+							jobGraph,
+							false)
+					.getClusterClient()) {
 
 				ApplicationId applicationId = clusterClient.getClusterId();
 
@@ -129,31 +119,29 @@ public class YARNITCase extends YarnTestBase {
 				assertThat(jobResult, is(notNullValue()));
 				assertThat(jobResult.getSerializedThrowable().isPresent(), is(false));
 
-				waitApplicationFinishedElseKillIt(applicationId, yarnAppTerminateTimeout, yarnClusterDescriptor);
+				waitApplicationFinishedElseKillIt(
+					applicationId, yarnAppTerminateTimeout, yarnClusterDescriptor, sleepIntervalInMS);
 			}
 		}
 	}
 
-	private void waitApplicationFinishedElseKillIt(
-			ApplicationId applicationId,
-			Duration timeout,
-			YarnClusterDescriptor yarnClusterDescriptor) throws Exception {
-		Deadline deadline = Deadline.now().plus(timeout);
-		YarnApplicationState state = getYarnClient().getApplicationReport(applicationId).getYarnApplicationState();
+	private JobGraph getTestingJobGraph() {
+		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+		env.setParallelism(2);
 
-		while (state != YarnApplicationState.FINISHED) {
-			if (state == YarnApplicationState.FAILED || state == YarnApplicationState.KILLED) {
-				fail("Application became FAILED or KILLED while expecting FINISHED");
-			}
+		env.addSource(new NoDataSource())
+			.shuffle()
+			.addSink(new DiscardingSink<>());
 
-			if (deadline.isOverdue()) {
-				yarnClusterDescriptor.killCluster(applicationId);
-				fail("Application didn't finish before timeout");
-			}
-
-			sleep(sleepIntervalInMS);
-			state = getYarnClient().getApplicationReport(applicationId).getYarnApplicationState();
-		}
+		return env.getStreamGraph().getJobGraph();
 	}
 
+	private Configuration createDefaultConfiguration(YarnConfigOptions.UserJarInclusion userJarInclusion) {
+		Configuration configuration = new Configuration();
+		configuration.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.parse("1g"));
+		configuration.setString(AkkaOptions.ASK_TIMEOUT, "30 s");
+		configuration.setString(CLASSPATH_INCLUDE_USER_JAR, userJarInclusion.toString());
+
+		return configuration;
+	}
 }

@@ -46,7 +46,6 @@ import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.client.program.ContextEnvironment;
 import org.apache.flink.client.program.OptimizerPlanEnvironment;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.PipelineOptions;
@@ -55,10 +54,11 @@ import org.apache.flink.configuration.ReadableConfigToConfigurationAdapter;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.core.execution.DefaultExecutorServiceLoader;
 import org.apache.flink.core.execution.DetachedJobExecutionResult;
-import org.apache.flink.core.execution.Executor;
-import org.apache.flink.core.execution.ExecutorFactory;
-import org.apache.flink.core.execution.ExecutorServiceLoader;
 import org.apache.flink.core.execution.JobClient;
+import org.apache.flink.core.execution.JobListener;
+import org.apache.flink.core.execution.PipelineExecutor;
+import org.apache.flink.core.execution.PipelineExecutorFactory;
+import org.apache.flink.core.execution.PipelineExecutorServiceLoader;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
@@ -70,7 +70,7 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.functions.source.ContinuousFileMonitoringFunction;
-import org.apache.flink.streaming.api.functions.source.ContinuousFileReaderOperator;
+import org.apache.flink.streaming.api.functions.source.ContinuousFileReaderOperatorFactory;
 import org.apache.flink.streaming.api.functions.source.FileMonitoringFunction;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.source.FileReadFunction;
@@ -86,6 +86,7 @@ import org.apache.flink.streaming.api.graph.StreamGraph;
 import org.apache.flink.streaming.api.graph.StreamGraphGenerator;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.util.DynamicCodeLoadingException;
+import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SplittableIterator;
 import org.apache.flink.util.StringUtils;
@@ -101,7 +102,7 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
-import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -161,11 +162,13 @@ public class StreamExecutionEnvironment {
 
 	protected final List<Tuple2<String, DistributedCache.DistributedCacheEntry>> cacheFile = new ArrayList<>();
 
-	private final ExecutorServiceLoader executorServiceLoader;
+	private final PipelineExecutorServiceLoader executorServiceLoader;
 
 	private final Configuration configuration;
 
 	private final ClassLoader userClassloader;
+
+	private final List<JobListener> jobListeners = new ArrayList<>();
 
 	// --------------------------------------------------------------------------------------------
 	// Constructor and Properties
@@ -173,19 +176,46 @@ public class StreamExecutionEnvironment {
 
 	public StreamExecutionEnvironment() {
 		this(new Configuration());
+		// unfortunately, StreamExecutionEnvironment always (implicitly) had a public constructor.
+		// This constructor is not useful because the execution environment cannot be used for
+		// execution. We're keeping this to appease the binary compatibiliy checks.
 	}
 
+	/**
+	 * Creates a new {@link StreamExecutionEnvironment} that will use the given {@link
+	 * Configuration} to configure the {@link PipelineExecutor}.
+	 */
+	@PublicEvolving
 	public StreamExecutionEnvironment(final Configuration configuration) {
 		this(DefaultExecutorServiceLoader.INSTANCE, configuration, null);
 	}
 
+	/**
+	 * Creates a new {@link StreamExecutionEnvironment} that will use the given {@link
+	 * Configuration} to configure the {@link PipelineExecutor}.
+	 *
+	 * <p>In addition, this constructor allows specifying the {@link PipelineExecutorServiceLoader} and
+	 * user code {@link ClassLoader}.
+	 */
+	@PublicEvolving
 	public StreamExecutionEnvironment(
-			final ExecutorServiceLoader executorServiceLoader,
+			final PipelineExecutorServiceLoader executorServiceLoader,
 			final Configuration configuration,
 			final ClassLoader userClassloader) {
 		this.executorServiceLoader = checkNotNull(executorServiceLoader);
 		this.configuration = checkNotNull(configuration);
 		this.userClassloader = userClassloader == null ? getClass().getClassLoader() : userClassloader;
+
+		// the configuration of a job or an operator can be specified at the following places:
+		//     i) at the operator level using e.g. parallelism using the SingleOutputStreamOperator.setParallelism().
+		//     ii) programmatically by using e.g. the env.setRestartStrategy() method
+		//     iii) in the configuration passed here
+		//
+		// if specified in multiple places, the priority order is the above.
+		//
+		// Given this, it is safe to overwrite the execution config default values here because all other ways assume
+		// that the env is already instantiated so they will overwrite the value passed here.
+		this.configure(this.configuration, this.userClassloader);
 	}
 
 	protected Configuration getConfiguration() {
@@ -726,7 +756,7 @@ public class StreamExecutionEnvironment {
 		configuration.getOptional(PipelineOptions.CACHED_FILES)
 			.ifPresent(f -> {
 				this.cacheFile.clear();
-				parseCachedFiles(f).forEach(t -> registerCachedFile(t.f1, t.f0, t.f2));
+				this.cacheFile.addAll(DistributedCache.parseCachedFilesFromString(f));
 			});
 		config.configure(configuration, classLoader);
 		checkpointCfg.configure(configuration);
@@ -741,24 +771,6 @@ public class StreamExecutionEnvironment {
 		} catch (DynamicCodeLoadingException | IOException e) {
 			throw new WrappingRuntimeException(e);
 		}
-	}
-
-	private List<Tuple3<String, String, Boolean>> parseCachedFiles(List<String> s) {
-		return s.stream()
-			.map(v -> Arrays.stream(v.split(","))
-				.map(p -> p.split(":"))
-				.collect(
-					Collectors.toMap(
-						arr -> arr[0], // key name
-						arr -> arr[1] // value
-					)
-				)
-			)
-			.map(m -> Tuple3.of(
-				m.get("name"),
-				m.get("path"),
-				Optional.ofNullable(m.get("executable")).map(Boolean::parseBoolean).orElse(false)))
-			.collect(Collectors.toList());
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -1031,7 +1043,7 @@ public class StreamExecutionEnvironment {
 	 *
 	 * <p><b>NOTES ON CHECKPOINTING: </b> The source monitors the path, creates the
 	 * {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits} to be processed, forwards
-	 * them to the downstream {@link ContinuousFileReaderOperator readers} to read the actual data,
+	 * them to the downstream readers to read the actual data,
 	 * and exits, without waiting for the readers to finish reading. This implies that no more
 	 * checkpoint barriers are going to be forwarded after the source exits, thus having no
 	 * checkpoints after that point.
@@ -1051,7 +1063,7 @@ public class StreamExecutionEnvironment {
 	 *
 	 * <p><b>NOTES ON CHECKPOINTING: </b> The source monitors the path, creates the
 	 * {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits} to be processed,
-	 * forwards them to the downstream {@link ContinuousFileReaderOperator readers} to read the actual data,
+	 * forwards them to the downstream readers to read the actual data,
 	 * and exits, without waiting for the readers to finish reading. This implies that no more checkpoint
 	 * barriers are going to be forwarded after the source exits, thus having no checkpoints after that point.
 	 *
@@ -1084,7 +1096,7 @@ public class StreamExecutionEnvironment {
 	 *
 	 * <p><b>NOTES ON CHECKPOINTING: </b> The source monitors the path, creates the
 	 * {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits} to be processed,
-	 * forwards them to the downstream {@link ContinuousFileReaderOperator readers} to read the actual data,
+	 * forwards them to the downstream readers to read the actual data,
 	 * and exits, without waiting for the readers to finish reading. This implies that no more checkpoint
 	 * barriers are going to be forwarded after the source exits, thus having no checkpoints after that point.
 	 *
@@ -1162,7 +1174,7 @@ public class StreamExecutionEnvironment {
 	 *
 	 * <p><b>NOTES ON CHECKPOINTING: </b> If the {@code watchType} is set to {@link FileProcessingMode#PROCESS_ONCE},
 	 * the source monitors the path <b>once</b>, creates the {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits}
-	 * to be processed, forwards them to the downstream {@link ContinuousFileReaderOperator readers} to read the actual data,
+	 * to be processed, forwards them to the downstream readers to read the actual data,
 	 * and exits, without waiting for the readers to finish reading. This implies that no more checkpoint barriers
 	 * are going to be forwarded after the source exits, thus having no checkpoints after that point.
 	 *
@@ -1233,7 +1245,7 @@ public class StreamExecutionEnvironment {
 	 *
 	 * <p><b>NOTES ON CHECKPOINTING: </b> If the {@code watchType} is set to {@link FileProcessingMode#PROCESS_ONCE},
 	 * the source monitors the path <b>once</b>, creates the {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits}
-	 * to be processed, forwards them to the downstream {@link ContinuousFileReaderOperator readers} to read the actual data,
+	 * to be processed, forwards them to the downstream readers to read the actual data,
 	 * and exits, without waiting for the readers to finish reading. This implies that no more checkpoint barriers
 	 * are going to be forwarded after the source exits, thus having no checkpoints after that point.
 	 *
@@ -1391,7 +1403,7 @@ public class StreamExecutionEnvironment {
 	 * <p><b>NOTES ON CHECKPOINTING: </b> In the case of a {@link FileInputFormat}, the source
 	 * (which executes the {@link ContinuousFileMonitoringFunction}) monitors the path, creates the
 	 * {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits} to be processed, forwards
-	 * them to the downstream {@link ContinuousFileReaderOperator} to read the actual data, and exits,
+	 * them to the downstream readers to read the actual data, and exits,
 	 * without waiting for the readers to finish reading. This implies that no more checkpoint
 	 * barriers are going to be forwarded after the source exits, thus having no checkpoints.
 	 *
@@ -1416,7 +1428,7 @@ public class StreamExecutionEnvironment {
 	 * <p><b>NOTES ON CHECKPOINTING: </b> In the case of a {@link FileInputFormat}, the source
 	 * (which executes the {@link ContinuousFileMonitoringFunction}) monitors the path, creates the
 	 * {@link org.apache.flink.core.fs.FileInputSplit FileInputSplits} to be processed, forwards
-	 * them to the downstream {@link ContinuousFileReaderOperator} to read the actual data, and exits,
+	 * them to the downstream readers to read the actual data, and exits,
 	 * without waiting for the readers to finish reading. This implies that no more checkpoint
 	 * barriers are going to be forwarded after the source exits, thus having no checkpoints.
 	 *
@@ -1471,11 +1483,10 @@ public class StreamExecutionEnvironment {
 		ContinuousFileMonitoringFunction<OUT> monitoringFunction =
 			new ContinuousFileMonitoringFunction<>(inputFormat, monitoringMode, getParallelism(), interval);
 
-		ContinuousFileReaderOperator<OUT> reader =
-			new ContinuousFileReaderOperator<>(inputFormat);
+		ContinuousFileReaderOperatorFactory<OUT> factory = new ContinuousFileReaderOperatorFactory<>(inputFormat);
 
 		SingleOutputStreamOperator<OUT> source = addSource(monitoringFunction, sourceName)
-				.transform("Split Reader: " + sourceName, typeInfo, reader);
+				.transform("Split Reader: " + sourceName, typeInfo, factory);
 
 		return new DataStreamSource<>(source);
 	}
@@ -1619,50 +1630,160 @@ public class StreamExecutionEnvironment {
 	 */
 	@Internal
 	public JobExecutionResult execute(StreamGraph streamGraph) throws Exception {
-		if (configuration.get(DeploymentOptions.TARGET) == null) {
-			throw new RuntimeException("No execution.target specified in your configuration file.");
-		}
+		final JobClient jobClient = executeAsync(streamGraph);
 
-		consolidateParallelismDefinitionsInConfiguration();
+		try {
+			final JobExecutionResult jobExecutionResult;
 
-		final ExecutorFactory executorFactory =
-				executorServiceLoader.getExecutorFactory(configuration);
+			if (configuration.getBoolean(DeploymentOptions.ATTACHED)) {
+				jobExecutionResult = jobClient.getJobExecutionResult(userClassloader).get();
+			} else {
+				jobExecutionResult = new DetachedJobExecutionResult(jobClient.getJobID());
+			}
 
-		final Executor executor = executorFactory.getExecutor(configuration);
+			jobListeners.forEach(jobListener -> jobListener.onJobExecuted(jobExecutionResult, null));
 
-		try (final JobClient jobClient = executor.execute(streamGraph, configuration).get()) {
+			return jobExecutionResult;
+		} catch (Throwable t) {
+			jobListeners.forEach(jobListener -> {
+				jobListener.onJobExecuted(null, ExceptionUtils.stripExecutionException(t));
+			});
+			ExceptionUtils.rethrowException(t);
 
-			return configuration.getBoolean(DeploymentOptions.ATTACHED)
-					? jobClient.getJobExecutionResult(userClassloader).get()
-					: new DetachedJobExecutionResult(jobClient.getJobID());
-		}
-	}
-
-	private void consolidateParallelismDefinitionsInConfiguration() {
-		if (getParallelism() == ExecutionConfig.PARALLELISM_DEFAULT) {
-			configuration.getOptional(CoreOptions.DEFAULT_PARALLELISM).ifPresent(this::setParallelism);
+			// never reached, only make javac happy
+			return null;
 		}
 	}
 
 	/**
-	 * Getter of the {@link org.apache.flink.streaming.api.graph.StreamGraph} of the streaming job.
+	 * Register a {@link JobListener} in this environment. The {@link JobListener} will be
+	 * notified on specific job status changed.
+	 */
+	@PublicEvolving
+	public void registerJobListener(JobListener jobListener) {
+		checkNotNull(jobListener, "JobListener cannot be null");
+		jobListeners.add(jobListener);
+	}
+
+	/**
+	 * Clear all registered {@link JobListener}s.
+	 */
+	@PublicEvolving
+	public void clearJobListeners() {
+		this.jobListeners.clear();
+	}
+
+	/**
+	 * Triggers the program asynchronously. The environment will execute all parts of
+	 * the program that have resulted in a "sink" operation. Sink operations are
+	 * for example printing results or forwarding them to a message queue.
+	 *
+	 * <p>The program execution will be logged and displayed with a generated
+	 * default name.
+	 *
+	 * @return A {@link JobClient} that can be used to communicate with the submitted job, completed on submission succeeded.
+	 * @throws Exception which occurs during job execution.
+	 */
+	@PublicEvolving
+	public final JobClient executeAsync() throws Exception {
+		return executeAsync(DEFAULT_JOB_NAME);
+	}
+
+	/**
+	 * Triggers the program execution asynchronously. The environment will execute all parts of
+	 * the program that have resulted in a "sink" operation. Sink operations are
+	 * for example printing results or forwarding them to a message queue.
+	 *
+	 * <p>The program execution will be logged and displayed with the provided name
+	 *
+	 * @param jobName desired name of the job
+	 * @return A {@link JobClient} that can be used to communicate with the submitted job, completed on submission succeeded.
+	 * @throws Exception which occurs during job execution.
+	 */
+	@PublicEvolving
+	public JobClient executeAsync(String jobName) throws Exception {
+		return executeAsync(getStreamGraph(checkNotNull(jobName)));
+	}
+
+	/**
+	 * Triggers the program execution asynchronously. The environment will execute all parts of
+	 * the program that have resulted in a "sink" operation. Sink operations are
+	 * for example printing results or forwarding them to a message queue.
+	 *
+	 * @param streamGraph the stream graph representing the transformations
+	 * @return A {@link JobClient} that can be used to communicate with the submitted job, completed on submission succeeded.
+	 * @throws Exception which occurs during job execution.
+	 */
+	@Internal
+	public JobClient executeAsync(StreamGraph streamGraph) throws Exception {
+		checkNotNull(streamGraph, "StreamGraph cannot be null.");
+		checkNotNull(configuration.get(DeploymentOptions.TARGET), "No execution.target specified in your configuration file.");
+
+		final PipelineExecutorFactory executorFactory =
+			executorServiceLoader.getExecutorFactory(configuration);
+
+		checkNotNull(
+			executorFactory,
+			"Cannot find compatible factory for specified execution.target (=%s)",
+			configuration.get(DeploymentOptions.TARGET));
+
+		CompletableFuture<JobClient> jobClientFuture = executorFactory
+			.getExecutor(configuration)
+			.execute(streamGraph, configuration);
+
+		try {
+			JobClient jobClient = jobClientFuture.get();
+			jobListeners.forEach(jobListener -> jobListener.onJobSubmitted(jobClient, null));
+			return jobClient;
+		} catch (Throwable t) {
+			jobListeners.forEach(jobListener -> jobListener.onJobSubmitted(null, t));
+			ExceptionUtils.rethrow(t);
+
+			// make javac happy, this code path will not be reached
+			return null;
+		}
+	}
+
+	/**
+	 * Getter of the {@link org.apache.flink.streaming.api.graph.StreamGraph} of the streaming job. This call
+	 * clears previously registered {@link Transformation transformations}.
 	 *
 	 * @return The streamgraph representing the transformations
 	 */
 	@Internal
 	public StreamGraph getStreamGraph() {
-		return getStreamGraphGenerator().generate();
+		return getStreamGraph(DEFAULT_JOB_NAME);
 	}
 
 	/**
-	 * Getter of the {@link org.apache.flink.streaming.api.graph.StreamGraph} of the streaming job.
+	 * Getter of the {@link org.apache.flink.streaming.api.graph.StreamGraph} of the streaming job. This call
+	 * clears previously registered {@link Transformation transformations}.
 	 *
 	 * @param jobName Desired name of the job
 	 * @return The streamgraph representing the transformations
 	 */
 	@Internal
 	public StreamGraph getStreamGraph(String jobName) {
-		return getStreamGraphGenerator().setJobName(jobName).generate();
+		return getStreamGraph(jobName, true);
+	}
+
+	/**
+	 * Getter of the {@link org.apache.flink.streaming.api.graph.StreamGraph StreamGraph} of the streaming job
+	 * with the option to clear previously registered {@link Transformation transformations}. Clearing the
+	 * transformations allows, for example, to not re-execute the same operations when calling
+	 * {@link #execute()} multiple times.
+	 *
+	 * @param jobName Desired name of the job
+	 * @param clearTransformations Whether or not to clear previously registered transformations
+	 * @return The streamgraph representing the transformations
+	 */
+	@Internal
+	public StreamGraph getStreamGraph(String jobName, boolean clearTransformations) {
+		StreamGraph streamGraph = getStreamGraphGenerator().setJobName(jobName).generate();
+		if (clearTransformations) {
+			this.transformations.clear();
+		}
+		return streamGraph;
 	}
 
 	private StreamGraphGenerator getStreamGraphGenerator() {
@@ -1686,7 +1807,7 @@ public class StreamExecutionEnvironment {
 	 * @return The execution plan of the program, as a JSON String.
 	 */
 	public String getExecutionPlan() {
-		return getStreamGraph().getStreamingPlanAsJSON();
+		return getStreamGraph(DEFAULT_JOB_NAME, false).getStreamingPlanAsJSON();
 	}
 
 	/**

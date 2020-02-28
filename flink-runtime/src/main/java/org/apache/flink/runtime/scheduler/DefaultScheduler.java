@@ -19,6 +19,7 @@
 
 package org.apache.flink.runtime.scheduler;
 
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.blob.BlobWriter;
@@ -88,9 +89,9 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
 	private final SchedulingStrategy schedulingStrategy;
 
-	private final ExecutionVertexVersioner executionVertexVersioner;
-
 	private final ExecutionVertexOperations executionVertexOperations;
+
+	private final Set<ExecutionVertexID> verticesWaitingForRestart;
 
 	public DefaultScheduler(
 		final Logger log,
@@ -132,14 +133,15 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 			jobManagerJobMetricGroup,
 			slotRequestTimeout,
 			shuffleMaster,
-			partitionTracker);
+			partitionTracker,
+			executionVertexVersioner,
+			false);
 
 		this.log = log;
 
 		this.delayExecutor = checkNotNull(delayExecutor);
 		this.userCodeLoader = checkNotNull(userCodeLoader);
 		this.executionVertexOperations = checkNotNull(executionVertexOperations);
-		this.executionVertexVersioner = checkNotNull(executionVertexVersioner);
 
 		final FailoverStrategy failoverStrategy = failoverStrategyFactory.create(
 			getFailoverTopology(),
@@ -152,6 +154,8 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 			restartBackoffTimeStrategy);
 		this.schedulingStrategy = schedulingStrategyFactory.createInstance(this, getSchedulingTopology());
 		this.executionSlotAllocator = checkNotNull(executionSlotAllocatorFactory).createInstance(getInputsLocationsRetriever());
+
+		this.verticesWaitingForRestart = new HashSet<>();
 	}
 
 	// ------------------------------------------------------------------------
@@ -165,7 +169,7 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
 	@Override
 	protected void startSchedulingInternal() {
-		log.debug("Starting scheduling with scheduling strategy [{}]", schedulingStrategy.getClass().getName());
+		log.info("Starting scheduling with scheduling strategy [{}]", schedulingStrategy.getClass().getName());
 		prepareExecutionGraphForNgScheduling();
 		schedulingStrategy.startScheduling();
 	}
@@ -183,13 +187,16 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 		}
 	}
 
-	private void handleTaskFailure(final ExecutionVertexID executionVertexId, final Throwable error) {
+	private void handleTaskFailure(final ExecutionVertexID executionVertexId, @Nullable final Throwable error) {
+		setGlobalFailureCause(error);
 		final FailureHandlingResult failureHandlingResult = executionFailureHandler.getFailureHandlingResult(executionVertexId, error);
 		maybeRestartTasks(failureHandlingResult);
 	}
 
 	@Override
 	public void handleGlobalFailure(final Throwable error) {
+		setGlobalFailureCause(error);
+
 		log.info("Trying to recover from a global failure.", error);
 		final FailureHandlingResult failureHandlingResult = executionFailureHandler.getGlobalFailureHandlingResult(error);
 		maybeRestartTasks(failureHandlingResult);
@@ -209,6 +216,8 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 		final Set<ExecutionVertexVersion> executionVertexVersions =
 			new HashSet<>(executionVertexVersioner.recordVertexModifications(verticesToRestart).values());
 
+		addVerticesToRestartPending(verticesToRestart);
+
 		final CompletableFuture<?> cancelFuture = cancelTasksAsync(verticesToRestart);
 
 		delayExecutor.schedule(
@@ -218,9 +227,23 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 			TimeUnit.MILLISECONDS);
 	}
 
+	private void addVerticesToRestartPending(final Set<ExecutionVertexID> verticesToRestart) {
+		verticesWaitingForRestart.addAll(verticesToRestart);
+		transitionExecutionGraphState(JobStatus.RUNNING, JobStatus.RESTARTING);
+	}
+
+	private void removeVerticesFromRestartPending(final Set<ExecutionVertexID> verticesToRestart) {
+		verticesWaitingForRestart.removeAll(verticesToRestart);
+		if (verticesWaitingForRestart.isEmpty()) {
+			transitionExecutionGraphState(JobStatus.RESTARTING, JobStatus.RUNNING);
+		}
+	}
+
 	private Runnable restartTasks(final Set<ExecutionVertexVersion> executionVertexVersions) {
 		return () -> {
 			final Set<ExecutionVertexID> verticesToRestart = executionVertexVersioner.getUnmodifiedExecutionVertices(executionVertexVersions);
+
+			removeVerticesFromRestartPending(verticesToRestart);
 
 			resetForNewExecutions(verticesToRestart);
 
@@ -420,8 +443,7 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 	}
 
 	private void handleTaskDeploymentFailure(final ExecutionVertexID executionVertexId, final Throwable error) {
-		log.info("Error while scheduling or deploying task {}.", executionVertexId, error);
-		handleTaskFailure(executionVertexId, error);
+		executionVertexOperations.markFailed(getExecutionVertex(executionVertexId), error);
 	}
 
 	private static Throwable maybeWrapWithNoResourceAvailableException(final Throwable failure) {

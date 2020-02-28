@@ -25,6 +25,8 @@ import org.apache.flink.client.deployment.ClusterClientServiceLoader;
 import org.apache.flink.client.deployment.DefaultClusterClientServiceLoader;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.yarn.cli.FlinkYarnSessionCli;
 
 import org.junit.AfterClass;
@@ -63,6 +65,7 @@ public class CliFrontendRunWithYarnTest extends CliFrontendTestBase {
 		Configuration configuration = new Configuration();
 		configuration.setString(JobManagerOptions.ADDRESS, "localhost");
 		configuration.setInteger(JobManagerOptions.PORT, 8081);
+		configuration.set(TaskManagerOptions.TOTAL_FLINK_MEMORY, MemorySize.parse("1g"));
 
 		final ClusterClientServiceLoader testServiceLoader = new DefaultClusterClientServiceLoader();
 

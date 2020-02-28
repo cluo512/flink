@@ -21,8 +21,10 @@ import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
 import org.apache.flink.table.runtime.util.SegmentsUtil;
 import org.apache.flink.table.types.logical.DecimalType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.table.types.logical.TimestampType;
 
 import java.nio.ByteOrder;
 
@@ -80,14 +82,16 @@ public final class BinaryRow extends BinarySection implements BaseRow {
 			case TIME_WITHOUT_TIME_ZONE:
 			case INTERVAL_YEAR_MONTH:
 			case BIGINT:
-			case TIMESTAMP_WITHOUT_TIME_ZONE:
-			case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
 			case INTERVAL_DAY_TIME:
 			case FLOAT:
 			case DOUBLE:
 				return true;
 			case DECIMAL:
 				return ((DecimalType) type).getPrecision() <= Decimal.MAX_COMPACT_PRECISION;
+			case TIMESTAMP_WITHOUT_TIME_ZONE:
+				return SqlTimestamp.isCompact(((TimestampType) type).getPrecision());
+			case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+				return SqlTimestamp.isCompact(((LocalZonedTimestampType) type).getPrecision());
 			default:
 				return false;
 		}

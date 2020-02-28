@@ -61,6 +61,10 @@ public class ResultPartitionBuilder {
 
 	private boolean releasedOnConsumption;
 
+	private boolean blockingShuffleCompressionEnabled = false;
+
+	private String compressionCodec = "LZ4";
+
 	public ResultPartitionBuilder setResultPartitionId(ResultPartitionID partitionId) {
 		this.partitionId = partitionId;
 		return this;
@@ -129,6 +133,16 @@ public class ResultPartitionBuilder {
 		return this;
 	}
 
+	public ResultPartitionBuilder setBlockingShuffleCompressionEnabled(boolean blockingShuffleCompressionEnabled) {
+		this.blockingShuffleCompressionEnabled = blockingShuffleCompressionEnabled;
+		return this;
+	}
+
+	public ResultPartitionBuilder setCompressionCodec(String compressionCodec) {
+		this.compressionCodec = compressionCodec;
+		return this;
+	}
+
 	ResultPartitionBuilder setBoundedBlockingSubpartitionType(
 			@SuppressWarnings("SameParameterValue") BoundedBlockingSubpartitionType blockingSubpartitionType) {
 		this.blockingSubpartitionType = blockingSubpartitionType;
@@ -144,7 +158,9 @@ public class ResultPartitionBuilder {
 			networkBuffersPerChannel,
 			floatingNetworkBuffersPerGate,
 			networkBufferSize,
-			releasedOnConsumption);
+			releasedOnConsumption,
+			blockingShuffleCompressionEnabled,
+			compressionCodec);
 
 		FunctionWithException<BufferPoolOwner, BufferPool, IOException> factory = bufferPoolFactory.orElseGet(() ->
 			resultPartitionFactory.createBufferPoolFactory(numberOfSubpartitions, partitionType));

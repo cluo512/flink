@@ -54,9 +54,16 @@ public interface CatalogFunction {
 	Optional<String> getDetailedDescription();
 
 	/**
-	 * Distinguish if the function is a generic Flink function.
+	 * Distinguish if the function is a generic function.
 	 *
-	 * @return whether the function is a generic Flink function
+	 * @return whether the function is a generic function
 	 */
 	boolean isGeneric();
+
+	/**
+	 * Get the language used for the definition of function.
+	 *
+	 * @return  the language type of the function definition
+	 */
+	FunctionLanguage getFunctionLanguage();
 }
