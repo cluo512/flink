@@ -71,7 +71,10 @@ function aws_cli() {
   if [[ $S3_ENDPOINT ]]; then
     endpoint="--endpoint-url $S3_ENDPOINT"
   fi
-  docker exec "$AWSCLI_CONTAINER_ID" aws $endpoint "$@"
+  if ! docker exec "$AWSCLI_CONTAINER_ID" aws $endpoint "$@"; then
+    echo "Error executing aws command: $@";
+    return 1
+  fi
 }
 
 ###################################
@@ -97,7 +100,7 @@ function s3_get_by_full_path_and_filename_prefix() {
     args="$args --recursive"
   fi
   local relative_dir=${1#$TEST_INFRA_DIR}
-  aws_cli s3 cp --quiet "s3://$IT_CASE_S3_BUCKET/$2" "/hostdir/${relative_dir}" $args
+  aws_cli s3 cp "s3://$IT_CASE_S3_BUCKET/$2" "/hostdir/${relative_dir}" $args
 }
 
 ###################################

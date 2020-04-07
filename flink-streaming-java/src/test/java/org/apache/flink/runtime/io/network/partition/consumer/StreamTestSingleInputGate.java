@@ -30,7 +30,6 @@ import org.apache.flink.runtime.io.network.buffer.BufferBuilder;
 import org.apache.flink.runtime.io.network.buffer.BufferConsumer;
 import org.apache.flink.runtime.io.network.partition.consumer.InputChannel.BufferAndAvailability;
 import org.apache.flink.runtime.io.network.partition.consumer.TestInputChannel.BufferAndAvailabilityProvider;
-import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.plugable.SerializationDelegate;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
 
@@ -124,8 +123,7 @@ public class StreamTestSingleInputGate<T> extends TestSingleInputGate {
 
 			inputChannels[channelIndex].addBufferAndAvailability(answer);
 
-			inputGate.setInputChannel(new IntermediateResultPartitionID(),
-				inputChannels[channelIndex]);
+			inputGate.setInputChannel(inputChannels[channelIndex]);
 		}
 	}
 
@@ -159,14 +157,6 @@ public class StreamTestSingleInputGate<T> extends TestSingleInputGate {
 	 * Returns true iff all input queues are empty.
 	 */
 	public boolean allQueuesEmpty() {
-//		for (int i = 0; i < numInputChannels; i++) {
-//			synchronized (inputQueues[i]) {
-//				inputQueues[i].add(InputValue.<T>event(new DummyEvent()));
-//				inputQueues[i].notifyAll();
-//				inputGate.onAvailableBuffer(inputChannels[i].getInputChannel());
-//			}
-//		}
-
 		for (int i = 0; i < numInputChannels; i++) {
 			if (inputQueues[i].size() > 0) {
 				return false;

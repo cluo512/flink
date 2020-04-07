@@ -22,7 +22,7 @@ import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.core.JoinRelType
 import org.apache.calcite.rex.{RexCall, RexNode}
 import org.apache.flink.streaming.api.datastream.DataStream
-import org.apache.flink.table.api.StreamQueryConfig
+import org.apache.flink.table.api.{StreamQueryConfig, TableException}
 import org.apache.flink.table.functions.utils.TableSqlFunction
 import org.apache.flink.table.plan.nodes.CommonPythonCorrelate
 import org.apache.flink.table.plan.nodes.logical.FlinkLogicalTableFunctionScan
@@ -56,6 +56,10 @@ class DataStreamPythonCorrelate(
     schema,
     joinType)
   with CommonPythonCorrelate {
+
+  if (condition.isDefined) {
+    throw new TableException("Currently Python correlate does not support conditions in left join.")
+  }
 
   override def copy(traitSet: RelTraitSet, inputs: java.util.List[RelNode]): RelNode = {
     new DataStreamPythonCorrelate(
@@ -91,7 +95,7 @@ class DataStreamPythonCorrelate(
     val sqlFunction = pythonTableFuncRexCall.getOperator.asInstanceOf[TableSqlFunction]
 
     val pythonOperator = getPythonTableFunctionOperator(
-      planner.getConfig.getConfiguration,
+      getConfig(planner.getConfig),
       pythonOperatorInputRowType,
       pythonOperatorOutputRowType,
       pythonFunctionInfo,
